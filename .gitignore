@@ -1,0 +1,86 @@
+# ==================================================
+# ArduinoSwift - .gitignore
+# ==================================================
+
+# ------------------------------
+# Build outputs
+# ------------------------------
+build/
+.build/
+DerivedData/
+out/
+dist/
+
+# Arduino CLI build/cache
+arduino_build/
+arduino_cache/
+**/arduino_build/
+**/arduino_cache/
+
+# Temporary sketch generation
+build/sketch/
+build/compile.log
+build/verify.log
+
+# ------------------------------
+# Swift / Embedded Swift
+# ------------------------------
+.swiftpm/
+Packages/
+Package.resolved
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.o
+*.a
+*.elf
+*.map
+
+# Swiftly
+.swiftly/
+.swiftc_path
+
+# ------------------------------
+# Arduino / C / C++
+# ------------------------------
+*.d
+*.obj
+*.bin
+*.hex
+*.lst
+
+# Core dumps
+core
+core.*
+
+# ------------------------------
+# Editor / IDE
+# ------------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# Xcode (if used for inspection)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# ------------------------------
+# OS
+# ------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ------------------------------
+# Logs
+# ------------------------------
+*.log
+
+# ------------------------------
+# Config overrides (optional)
+# ------------------------------
+# Uncomment if you want local-only configs
+# config.local.json
+# boards.local.json
