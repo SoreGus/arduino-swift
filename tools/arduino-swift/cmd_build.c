@@ -1,9 +1,11 @@
+// cmd_build.c
 #include "util.h"
 #include "jsonlite.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static void copy_file(const char* src, const char* dst) {
   char cmd[1024];
@@ -24,6 +26,152 @@ static void trim_nl(char* s) {
   if (!s) return;
   char* p = strchr(s, '\n');
   if (p) *p = 0;
+}
+
+// -----------------------------
+// helpers for lib array parsing
+// -----------------------------
+
+static const char* skip_ws(const char* p) {
+  while (*p && (*p==' ' || *p=='\t' || *p=='\r' || *p=='\n')) p++;
+  return p;
+}
+
+static int str_ieq(const char* a, const char* b) {
+  while (*a && *b) {
+    char ca = (char)tolower((unsigned char)*a);
+    char cb = (char)tolower((unsigned char)*b);
+    if (ca != cb) return 0;
+    a++; b++;
+  }
+  return (*a == 0 && *b == 0);
+}
+
+// parse config.json "lib": ["I2C","Button"] into libs[count][64]
+static int parse_lib_array(const char* json, char libs[][64], int max) {
+  if (!json) return 0;
+
+  const char* k = strstr(json, "\"lib\"");
+  if (!k) return 0;
+
+  k = strchr(k, ':');
+  if (!k) return 0;
+  k++;
+  k = skip_ws(k);
+
+  if (*k != '[') return 0;
+  k++; // after [
+
+  int count = 0;
+  for (;;) {
+    k = skip_ws(k);
+    if (*k == ']') { // end
+      return count;
+    }
+
+    if (*k == ',') { k++; continue; }
+
+    if (*k != '"') {
+      // not a string, skip token until comma or ]
+      while (*k && *k != ',' && *k != ']') k++;
+      continue;
+    }
+
+    // string
+    k++; // after opening quote
+    char tmp[64] = {0};
+    size_t n = 0;
+
+    while (*k && *k != '"' && n + 1 < sizeof(tmp)) {
+      // minimal escape handling for \"
+      if (*k == '\\' && k[1]) {
+        k++;
+      }
+      tmp[n++] = *k++;
+    }
+    tmp[n] = 0;
+
+    if (*k == '"') k++; // closing quote
+
+    if (tmp[0] && count < max) {
+      strncpy(libs[count], tmp, 63);
+      libs[count][63] = 0;
+      count++;
+    }
+
+    // advance to next item
+    while (*k && *k != ',' && *k != ']') k++;
+    if (*k == ',') k++;
+  }
+}
+
+// Find the actual directory name inside runtime_swift/libs/ that matches libName (case-insensitive).
+// Returns 1 and writes resolved path into out if found.
+static int resolve_lib_dir(const char* runtime_swift, const char* libName, char* out, size_t cap) {
+  // list immediate children of runtime_swift/libs
+  char libs_root[1024];
+  if (!path_join(libs_root, sizeof(libs_root), runtime_swift, "libs")) return 0;
+  if (!dir_exists(libs_root)) return 0;
+
+  char cmd[2048];
+  // mac/linux: list directories only
+  snprintf(cmd, sizeof(cmd), "ls -1 \"%s\" 2>/dev/null", libs_root);
+
+  char listing[65535];
+  if (run_cmd_capture(cmd, listing, sizeof(listing)) != 0) return 0;
+  if (!listing[0]) return 0;
+
+  char* p = listing;
+  while (*p) {
+    char* e = strchr(p, '\n');
+    if (e) *e = 0;
+
+    if (p[0]) {
+      // build candidate dir
+      char cand[1024];
+      if (path_join(cand, sizeof(cand), libs_root, p) && dir_exists(cand)) {
+        if (str_ieq(p, libName)) {
+          strncpy(out, cand, cap - 1);
+          out[cap - 1] = 0;
+          return 1;
+        }
+      }
+    }
+
+    if (!e) break;
+    p = e + 1;
+  }
+
+  return 0;
+}
+
+// Append a newline-separated file list to a quoted-args string buffer.
+static void append_swift_list_as_args(const char* newline_list, char* out_args, size_t out_cap) {
+  if (!newline_list || !newline_list[0]) return;
+
+  // copy to temp buffer to mutate (split lines)
+  char* tmp = (char*)malloc(strlen(newline_list) + 1);
+  if (!tmp) die("OOM");
+  strcpy(tmp, newline_list);
+
+  char* p = tmp;
+  while (*p) {
+    char* e = strchr(p, '\n');
+    if (e) *e = 0;
+
+    if (p[0]) {
+      size_t need = strlen(out_args) + strlen(p) + 4 + 2;
+      if (need >= out_cap) die("Too many swift files (args buffer overflow)");
+      strcat(out_args, "\"");
+      strcat(out_args, p);
+      strcat(out_args, "\" ");
+    }
+
+    if (!e) break;
+    p = e + 1;
+  }
+
+  free(tmp);
 }
 
 int cmd_build(int argc, char** argv) {
@@ -148,55 +296,71 @@ int cmd_build(int argc, char** argv) {
   require_and_copy(runtime_arduino, "SwiftRuntimeSupport.c", sketch_dir);
 
   // -----------------------------
-  // Compile Swift: runtime_swift/*.swift + PROJECT main.swift
+  // Compile Swift: runtime_swift/core/*.swift + selected libs + PROJECT main.swift
   // -----------------------------
   char obj[1024];
   snprintf(obj, sizeof(obj), "%s/ArduinoSwiftApp.o", sketch_dir);
 
-  // find runtime swift files
-  char find_cmd[2048];
-  snprintf(find_cmd, sizeof(find_cmd),
-    "find \"%s\" -maxdepth 1 -type f -name \"*.swift\" -print | sort",
+  // 1) core swift files
+  char find_core_cmd[2048];
+  snprintf(find_core_cmd, sizeof(find_core_cmd),
+    "find \"%s/core\" -type f -name \"*.swift\" -print | sort",
     runtime_swift
   );
 
-  char swift_list[65535];
-  if (run_cmd_capture(find_cmd, swift_list, sizeof(swift_list)) != 0)
-    die("Failed listing swift runtime sources");
-  if (!swift_list[0])
-    die("No Swift runtime sources found in: %s", runtime_swift);
+  char core_list[65535];
+  if (run_cmd_capture(find_core_cmd, core_list, sizeof(core_list)) != 0)
+    die("Failed listing swift core sources");
+  if (!core_list[0])
+    die("No Swift core sources found in: %s/core", runtime_swift);
 
-  // build quoted args from list (turn newline list into: "a" "b" "c")
-  char swift_args[120000];
+  // Build quoted args string (core first)
+  char swift_args[160000];
   swift_args[0] = 0;
+  append_swift_list_as_args(core_list, swift_args, sizeof(swift_args));
 
-  {
-    char* p = swift_list;
-    while (*p) {
-      char* e = strchr(p, '\n');
-      if (e) *e = 0;
+  // 2) parse config.json libs and append their swift files
+  char libs[64][64];
+  int lib_count = parse_lib_array(cfg, libs, 64);
 
-      if (p[0]) {
-        // append: "path"
-        size_t need = strlen(swift_args) + strlen(p) + 4 + 2;
-        if (need >= sizeof(swift_args)) die("Too many swift files (args buffer overflow)");
-        strcat(swift_args, "\"");
-        strcat(swift_args, p);
-        strcat(swift_args, "\" ");
-      }
-
-      if (!e) break;
-      p = e + 1;
-    }
+  if (lib_count > 0) {
+    ok("Including %d Swift lib(s) from config.json", lib_count);
+  } else {
+    ok("No libs specified in config.json (\"lib\": [...]) -> using core only");
   }
 
-  // project main.swift MUST exist in project root
+  for (int i = 0; i < lib_count; i++) {
+    const char* libname = libs[i];
+    if (!libname || !libname[0]) continue;
+
+    char libdir[1024];
+    if (!resolve_lib_dir(runtime_swift, libname, libdir, sizeof(libdir))) {
+      die("Swift lib not found: %s (expected in %s/libs/<LIB>/)", libname, runtime_swift);
+    }
+
+    char find_lib_cmd[2048];
+    snprintf(find_lib_cmd, sizeof(find_lib_cmd),
+      "find \"%s\" -type f -name \"*.swift\" -print | sort",
+      libdir
+    );
+
+    char lib_list[65535];
+    if (run_cmd_capture(find_lib_cmd, lib_list, sizeof(lib_list)) != 0)
+      die("Failed listing swift lib sources: %s", libdir);
+    if (!lib_list[0])
+      die("No Swift files found in lib dir: %s", libdir);
+
+    ok("Adding Swift lib: %s (%s)", libname, libdir);
+    append_swift_list_as_args(lib_list, swift_args, sizeof(swift_args));
+  }
+
+  // 3) project main.swift MUST exist in project root
   char main_swift[1024];
   snprintf(main_swift, sizeof(main_swift), "%s/main.swift", project_root);
   if (!file_exists(main_swift))
     die("Missing main.swift at project root: %s", main_swift);
 
-  // add it last (overrides / uses runtime API)
+  // add it last
   {
     size_t need = strlen(swift_args) + strlen(main_swift) + 4 + 2;
     if (need >= sizeof(swift_args)) die("Args buffer overflow adding main.swift");
@@ -206,7 +370,7 @@ int cmd_build(int argc, char** argv) {
   }
 
   // swiftc cmd (matches your compile.sh flags)
-  char swiftc_cmd[160000];
+  char swiftc_cmd[200000];
   snprintf(swiftc_cmd, sizeof(swiftc_cmd),
     "%s "
     "-target %s -O -wmo -parse-as-library "

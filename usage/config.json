@@ -1,3 +1,4 @@
 {
-  "board": "Due"
+  "board": "Due",
+  "lib": ["I2C", "Button"]
 }
