@@ -39,16 +39,26 @@ The goal is to let you write your firmware logic entirely in **Swift**, while Ar
 ## Example (Swift)
 
 ```swift
-import ArduinoRuntime
+@_silgen_name("arduino_swift_main")
+public func arduino_swift_main() {
+    Serial.begin(115200)
+    Serial.print("Swift main boot\n")
 
-let led = PIN.builtin
+    let led = PIN.builtin
+    led.output()
+    led.off()
 
-let button = Button(5, onPress: {
-    led.toggle()
-})
+    let button = Button(
+        5,
+        onPress: {
+            led.toggle()
+            Serial.print("Button pressed -> LED toggled\n")
+        }
+    )
 
-ArduinoRuntime.add(button)
-ArduinoRuntime.run()
+    ArduinoRuntime.add(button)
+    ArduinoRuntime.keepAlive()
+}
 ```
 
 ---
