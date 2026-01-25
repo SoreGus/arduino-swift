@@ -49,10 +49,6 @@ Package.resolved
 *.hex
 *.lst
 
-# Core dumps
-core
-core.*
-
 # ------------------------------
 # Editor / IDE
 # ------------------------------
