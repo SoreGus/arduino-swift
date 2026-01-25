@@ -1,4 +1,18 @@
 // cmd_build.c
+// - Compila Swift (core + libs selecionadas) em um .o
+// - Copia sketch + shim C/C++
+// - Copia libs Arduino (C/C++) correspondentes às libs Swift selecionadas
+//   de arduino/libs/<LIB>/ para build/sketch/libs/<LIB>/
+// - Chama arduino-cli compile injetando o .o do Swift
+//
+// Convenções:
+// - config.json pode ter: "lib": ["I2C", "BUTTON"]
+// - Swift libs em:   <tool>/swift/libs/<LIB>/   (case-insensitive resolve)
+// - Arduino libs em: <tool>/arduino/libs/<LIB>/ (case-insensitive resolve)
+// - Cada lib Arduino pode ter .c/.cpp/.h dentro do diretório, e subpastas.
+// - O core Swift NÃO deve duplicar typealias/decls que também existem nas libs.
+//   (isso é resolvido no código Swift, não aqui)
+
 #include "util.h"
 #include "jsonlite.h"
 
@@ -7,8 +21,12 @@
 #include <string.h>
 #include <ctype.h>
 
+// -----------------------------
+// fs helpers
+// -----------------------------
+
 static void copy_file(const char* src, const char* dst) {
-  char cmd[1024];
+  char cmd[2048];
   snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", src, dst);
   if (run_cmd(cmd) != 0) die("Failed to copy %s -> %s", src, dst);
 }
@@ -105,16 +123,18 @@ static int parse_lib_array(const char* json, char libs[][64], int max) {
   }
 }
 
+// -----------------------------
+// lib directory resolvers (Swift + Arduino)
+// -----------------------------
+
 // Find the actual directory name inside runtime_swift/libs/ that matches libName (case-insensitive).
 // Returns 1 and writes resolved path into out if found.
-static int resolve_lib_dir(const char* runtime_swift, const char* libName, char* out, size_t cap) {
-  // list immediate children of runtime_swift/libs
+static int resolve_swift_lib_dir(const char* runtime_swift, const char* libName, char* out, size_t cap) {
   char libs_root[1024];
   if (!path_join(libs_root, sizeof(libs_root), runtime_swift, "libs")) return 0;
   if (!dir_exists(libs_root)) return 0;
 
   char cmd[2048];
-  // mac/linux: list directories only
   snprintf(cmd, sizeof(cmd), "ls -1 \"%s\" 2>/dev/null", libs_root);
 
   char listing[65535];
@@ -127,7 +147,43 @@ static int resolve_lib_dir(const char* runtime_swift, const char* libName, char*
     if (e) *e = 0;
 
     if (p[0]) {
-      // build candidate dir
+      char cand[1024];
+      if (path_join(cand, sizeof(cand), libs_root, p) && dir_exists(cand)) {
+        if (str_ieq(p, libName)) {
+          strncpy(out, cand, cap - 1);
+          out[cap - 1] = 0;
+          return 1;
+        }
+      }
+    }
+
+    if (!e) break;
+    p = e + 1;
+  }
+
+  return 0;
+}
+
+// Find the actual directory name inside runtime_arduino/libs/ that matches libName (case-insensitive).
+// Returns 1 and writes resolved path into out if found.
+static int resolve_arduino_lib_dir(const char* runtime_arduino, const char* libName, char* out, size_t cap) {
+  char libs_root[1024];
+  if (!path_join(libs_root, sizeof(libs_root), runtime_arduino, "libs")) return 0;
+  if (!dir_exists(libs_root)) return 0;
+
+  char cmd[2048];
+  snprintf(cmd, sizeof(cmd), "ls -1 \"%s\" 2>/dev/null", libs_root);
+
+  char listing[65535];
+  if (run_cmd_capture(cmd, listing, sizeof(listing)) != 0) return 0;
+  if (!listing[0]) return 0;
+
+  char* p = listing;
+  while (*p) {
+    char* e = strchr(p, '\n');
+    if (e) *e = 0;
+
+    if (p[0]) {
       char cand[1024];
       if (path_join(cand, sizeof(cand), libs_root, p) && dir_exists(cand)) {
         if (str_ieq(p, libName)) {
@@ -149,7 +205,6 @@ static int resolve_lib_dir(const char* runtime_swift, const char* libName, char*
 static void append_swift_list_as_args(const char* newline_list, char* out_args, size_t out_cap) {
   if (!newline_list || !newline_list[0]) return;
 
-  // copy to temp buffer to mutate (split lines)
   char* tmp = (char*)malloc(strlen(newline_list) + 1);
   if (!tmp) die("OOM");
   strcpy(tmp, newline_list);
@@ -173,6 +228,30 @@ static void append_swift_list_as_args(const char* newline_list, char* out_args, 
 
   free(tmp);
 }
+
+// Copy an Arduino lib directory recursively into build/sketch/libs/<LIB>/
+// This brings in I2C.c/Button.c + headers + any nested folders.
+// macOS: cp -R "<src>/" "<dst>/"
+static void copy_arduino_lib_recursive(const char* src_lib_dir, const char* dst_lib_dir) {
+  // mkdir -p dst
+  {
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", dst_lib_dir);
+    if (run_cmd(cmd) != 0) die("Failed to mkdir: %s", dst_lib_dir);
+  }
+
+  // copy contents
+  {
+    char cmd[4096];
+    // trailing "/." copies contents into dir (not nesting an extra folder)
+    snprintf(cmd, sizeof(cmd), "cp -R \"%s/.\" \"%s/\"", src_lib_dir, dst_lib_dir);
+    if (run_cmd(cmd) != 0) die("Failed to copy Arduino lib dir: %s -> %s", src_lib_dir, dst_lib_dir);
+  }
+}
+
+// -----------------------------
+// cmd_build
+// -----------------------------
 
 int cmd_build(int argc, char** argv) {
   (void)argc; (void)argv;
@@ -238,17 +317,53 @@ int cmd_build(int argc, char** argv) {
 
   // clean + mkdir
   {
-    char cmd[2048];
+    char cmd[4096];
     snprintf(cmd, sizeof(cmd),
-      "rm -rf \"%s\" \"%s\" && mkdir -p \"%s\" \"%s\" \"%s\" \"%s\"",
-      sketch_dir, ard_build, build_dir, sketch_dir, ard_build, ard_cache);
-    if (run_cmd(cmd) != 0) die("Failed to prepare build dirs");
+      "rm -rf \"%s\" \"%s\" && mkdir -p \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"",
+      sketch_dir, ard_build,
+      build_dir, sketch_dir, ard_build, ard_cache,
+      // also create libs root for Arduino libs
+      // build/sketch/libs
+      (char*)"" // placeholder, overwritten below (we don't want varargs mess here)
+    );
+    // ^ we won't use this string because of placeholder trick. We'll just do 2-step below.
+  }
+  {
+    char cmd[4096];
+    // Step 1: clean
+    snprintf(cmd, sizeof(cmd),
+      "rm -rf \"%s\" \"%s\"",
+      sketch_dir, ard_build
+    );
+    if (run_cmd(cmd) != 0) die("Failed to clean build dirs");
+  }
+  {
+    char cmd[4096];
+    // Step 2: mkdir
+    snprintf(cmd, sizeof(cmd),
+      "mkdir -p \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"",
+      build_dir, sketch_dir, ard_build, ard_cache,
+      // build/sketch/libs
+      build_dir /* temporary, replaced below */
+    );
+    // we'll just run another mkdir for libs path; simplest & robust.
+    if (run_cmd(cmd) != 0) die("Failed to prepare build dirs (mkdir)");
+  }
+  {
+    char libs_root[1024];
+    snprintf(libs_root, sizeof(libs_root), "%s/libs", sketch_dir);
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", libs_root);
+    if (run_cmd(cmd) != 0) die("Failed to prepare libs dir: %s", libs_root);
   }
 
   char* cfg = read_file(config_path);
   char* bjs = read_file(boards_path);
   if (!cfg || !bjs) die("Failed to read config/boards json");
 
+  // -----------------------------
+  // Board selection
+  // -----------------------------
   char board[128]={0};
   if (!json_get_string(cfg, "board", board, sizeof(board)))
     die("config.json missing board");
@@ -286,7 +401,7 @@ int cmd_build(int argc, char** argv) {
   if (!swiftc[0]) strncpy(swiftc, "swiftc", sizeof(swiftc)-1);
 
   // -----------------------------
-  // Copy REAL sketch sources from tool runtime -> project build/sketch
+  // Copy sketch sources from tool runtime -> project build/sketch
   // -----------------------------
   ok("Preparing Arduino sketch...");
   require_and_copy(runtime_arduino, "sketch.ino", sketch_dir);
@@ -315,7 +430,7 @@ int cmd_build(int argc, char** argv) {
     die("No Swift core sources found in: %s/core", runtime_swift);
 
   // Build quoted args string (core first)
-  char swift_args[160000];
+  char swift_args[200000];
   swift_args[0] = 0;
   append_swift_list_as_args(core_list, swift_args, sizeof(swift_args));
 
@@ -329,29 +444,44 @@ int cmd_build(int argc, char** argv) {
     ok("No libs specified in config.json (\"lib\": [...]) -> using core only");
   }
 
+  // Also copy corresponding Arduino libs into build/sketch/libs/<LIB>/
   for (int i = 0; i < lib_count; i++) {
     const char* libname = libs[i];
     if (!libname || !libname[0]) continue;
 
-    char libdir[1024];
-    if (!resolve_lib_dir(runtime_swift, libname, libdir, sizeof(libdir))) {
+    // --- Swift lib dir
+    char swift_libdir[1024];
+    if (!resolve_swift_lib_dir(runtime_swift, libname, swift_libdir, sizeof(swift_libdir))) {
       die("Swift lib not found: %s (expected in %s/libs/<LIB>/)", libname, runtime_swift);
     }
 
     char find_lib_cmd[2048];
     snprintf(find_lib_cmd, sizeof(find_lib_cmd),
       "find \"%s\" -type f -name \"*.swift\" -print | sort",
-      libdir
+      swift_libdir
     );
 
     char lib_list[65535];
     if (run_cmd_capture(find_lib_cmd, lib_list, sizeof(lib_list)) != 0)
-      die("Failed listing swift lib sources: %s", libdir);
+      die("Failed listing swift lib sources: %s", swift_libdir);
     if (!lib_list[0])
-      die("No Swift files found in lib dir: %s", libdir);
+      die("No Swift files found in lib dir: %s", swift_libdir);
 
-    ok("Adding Swift lib: %s (%s)", libname, libdir);
+    ok("Adding Swift lib: %s (%s)", libname, swift_libdir);
     append_swift_list_as_args(lib_list, swift_args, sizeof(swift_args));
+
+    // --- Arduino lib dir (optional but expected by your new convention)
+    char arduino_libdir[1024];
+    if (!resolve_arduino_lib_dir(runtime_arduino, libname, arduino_libdir, sizeof(arduino_libdir))) {
+      die("Arduino lib not found: %s (expected in %s/libs/<LIB>/)", libname, runtime_arduino);
+    }
+
+    // Copy into build/sketch/libs/<ResolvedName> (use libname as requested key, but keep it stable)
+    char dst_libdir[1024];
+    snprintf(dst_libdir, sizeof(dst_libdir), "%s/libs/%s", sketch_dir, libname);
+
+    ok("Copying Arduino lib: %s (%s -> %s)", libname, arduino_libdir, dst_libdir);
+    copy_arduino_lib_recursive(arduino_libdir, dst_libdir);
   }
 
   // 3) project main.swift MUST exist in project root
@@ -369,8 +499,8 @@ int cmd_build(int argc, char** argv) {
     strcat(swift_args, "\" ");
   }
 
-  // swiftc cmd (matches your compile.sh flags)
-  char swiftc_cmd[200000];
+  // swiftc cmd
+  char swiftc_cmd[260000];
   snprintf(swiftc_cmd, sizeof(swiftc_cmd),
     "%s "
     "-target %s -O -wmo -parse-as-library "
@@ -395,7 +525,7 @@ int cmd_build(int argc, char** argv) {
   // -----------------------------
   // arduino-cli compile (inject obj)
   // -----------------------------
-  char cli_cmd[8192];
+  char cli_cmd[16384];
   snprintf(cli_cmd, sizeof(cli_cmd),
     "arduino-cli compile --clean "
     "--fqbn \"%s\" "
