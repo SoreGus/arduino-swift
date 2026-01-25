@@ -1,0 +1,7 @@
+{
+  "Due": {
+    "fqbn": "arduino:sam:arduino_due_x",
+    "core": "arduino:sam",
+    "swift_target": "armv7-none-none-eabi"
+  }
+}
