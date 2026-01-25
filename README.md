@@ -1,236 +1,85 @@
-# ArduinoSwift
+# Arduino Swift
 
-ArduinoSwift is a **minimal, modern Swift runtime for Arduino boards** using **Embedded Swift**.
-The goal is to let you write Arduino programs in Swift with a clean, expressive API — without
-losing the simplicity of the Arduino mental model.
+**Arduino Swift** is an experimental toolchain that allows you to write Arduino applications in **Swift**, using **Embedded Swift**, while still relying on the official Arduino core, bootloaders, and toolchain underneath.
 
-This project is intentionally **low-level, explicit, and hackable**.
+This project is **under active development** and should be considered **unstable**. APIs, structure, and behavior may change at any time.
 
 ---
 
-## ✨ Features
+## What this project is
 
-- Embedded Swift (no Foundation, no heavy runtime)
-- Works with `arduino-cli`
-- Clean C ↔ Swift ABI boundary
-- High-level Swift APIs:
-  - `PIN`, `AnalogPIN`
-  - `Button` with `onPress` / `onRelease`
-  - `Serial.print(...)`
-  - Cooperative runtime (`ArduinoRuntime`)
-- No hidden magic
-- No blocking delays (runtime-safe)
+Arduino Swift is composed of:
+
+- A **command-line tool written in C**
+- A **Swift runtime layer** that runs on microcontrollers
+- A thin **C/C++ bridge** that connects Swift with the Arduino core
+
+The goal is to let you write your firmware logic entirely in **Swift**, while Arduino CLI, cores, and upload mechanisms remain untouched.
 
 ---
 
-## 📦 Project Structure
+## Current status
 
+- 🚧 Work in progress
+- 🚫 Not production ready
+- 🔧 Focused on experimentation and research
+- 🧪 Tested mainly with Arduino Due and ARM-based boards
+
+---
+
+## How it works (high level)
+
+1. You write your application logic in Swift
+2. Swift is compiled with **Embedded Swift** into an object file
+3. Arduino CLI builds the final firmware, linking the Swift object together with the Arduino core
+4. The firmware is uploaded normally using Arduino tools
+
+---
+
+## Example (Swift)
+
+```swift
+import ArduinoRuntime
+
+let led = PIN.builtin
+
+let button = Button(5, onPress: {
+    led.toggle()
+})
+
+ArduinoRuntime.add(button)
+ArduinoRuntime.run()
 ```
-ArduinoSwift/
-├── swift/
-│   ├── App.swift
-│   ├── ArduinoAPI.swift
-│   ├── ArduinoRuntime.swift
-│   ├── PIN.swift
-│   ├── AnalogPIN.swift
-│   ├── Button.swift
-│   └── Serial.swift
-│
-├── steps/
-│   ├── verify.sh
-│   ├── compile.sh
-│   ├── upload.sh
-│   └── monitor.sh
-│
-├── boards.json
-├── config.json
-└── README.md
-```
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Verify toolchain
+## Tool usage
 
 ```bash
-./run.sh verify
+arduino-swift build
+arduino-swift upload
+arduino-swift monitor
 ```
 
-This checks:
-- `arduino-cli`
-- Embedded Swift toolchain
-- Board configuration
+The tool internally uses `arduino-cli` and `swiftc` (Embedded Swift).
 
 ---
 
-### 2. Compile
+## Design goals
 
-```bash
-./run.sh compile
-```
-
-This:
-- Compiles Swift → `.o` using Embedded Swift
-- Generates Arduino sketch
-- Links everything via `arduino-cli`
+- Use real Swift on microcontrollers
+- Avoid Arduino core forks
+- Keep the build pipeline transparent
+- Favor simplicity over features
 
 ---
 
-### 3. Upload
+## Disclaimer
 
-```bash
-./run.sh upload
-```
+This project is experimental and intended for research, learning, and exploration.
 
 ---
 
-### 4. Monitor Serial
+## License
 
-```bash
-./run.sh monitor
-```
-
----
-
-## 🧠 Minimal Example
-
-```swift
-@_cdecl("arduino_swift_main")
-public func arduino_swift_main() -> Void {
-    Serial.begin(115200)
-    Serial.print("Boot OK\n")
-
-    let led = PIN.builtin
-    led.off()
-
-    let button = Button(
-        5,
-        onPress: {
-            led.toggle()
-            Serial.print("pressed\n")
-        },
-        onRelease: {
-            Serial.print("released\n")
-        }
-    )
-
-    ArduinoRuntime.add(button)
-
-    ArduinoRuntime.keepAlive()
-}
-```
-
----
-
-## ⏱ Cooperative Delays (Important)
-
-**Never use `arduino_delay_ms()` directly inside logic loops.**
-
-Instead:
-
-```swift
-ArduinoRuntime.delay(ms: 500)
-```
-
-This keeps:
-- Buttons responsive
-- Runtime ticking
-- No blocking
-
-Example:
-
-```swift
-ArduinoRuntime.keepAlive {
-    ArduinoRuntime.delay(ms: 500)
-    Serial.print("tick\n")
-}
-```
-
----
-
-## 🔘 Button API
-
-```swift
-let button = Button(
-    5,
-    onPress: {
-        Serial.print("pressed\n")
-    },
-    onRelease: {
-        Serial.print("released\n")
-    }
-)
-
-button.enable()
-button.disable()
-
-if button.isOn() {
-    // button currently pressed
-}
-```
-
-- Default mode: `INPUT_PULLUP`
-- Debounced
-- Runtime-driven (no busy loops)
-
----
-
-## 🔌 Serial API
-
-```swift
-Serial.begin(115200)
-
-Serial.print("Hello")
-Serial.print(42)
-Serial.print(3.14)
-Serial.print("\n")
-```
-
-No `println` by design.
-
----
-
-## 🧩 Design Principles
-
-- **Swift stays in Swift**
-- **ISRs stay in C**
-- No Swift code ever runs inside interrupts
-- All events are dispatched cooperatively
-- Explicit > implicit
-- Simple > clever
-
----
-
-## ⚠️ Supported Boards
-
-- Arduino Due (SAM3X) ✅
-- Other ARM boards: possible with minor tweaks
-- AVR: **not supported** (Embedded Swift limitation)
-
----
-
-## 🛠 Requirements
-
-- macOS or Linux
-- `arduino-cli`
-- Embedded Swift toolchain (Swift 6+ snapshot)
-- ARM-based Arduino board
-
----
-
-## 📜 License
-
-MIT — do whatever you want, just don’t pretend you wrote it 😉
-
----
-
-## ❤️ Philosophy
-
-This project is for people who:
-- Like understanding what runs on the metal
-- Want modern language ergonomics
-- Hate opaque frameworks
-- Enjoy building their own tools
-
-Have fun 🚀
+To be defined.
