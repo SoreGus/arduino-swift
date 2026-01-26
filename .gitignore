@@ -84,3 +84,5 @@ Thumbs.db
 # bins
 
 **/arduino-swift
+!arduino-swift/
+!arduino-swift/boards.json
