@@ -17,6 +17,11 @@ public enum ArduinoRuntime {
     }
 
     @inline(__always)
+    public static var hasItems: Bool {
+        !items.isEmpty
+    }
+
+    @inline(__always)
     public static func removeAll() {
         items.removeAll(keepingCapacity: false)
     }

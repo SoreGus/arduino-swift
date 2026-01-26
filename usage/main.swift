@@ -20,5 +20,8 @@ public func arduino_swift_main() {
     )
 
     ArduinoRuntime.add(button)
-    ArduinoRuntime.keepAlive()
+    while true {
+        delay(5000)
+        Serial.print("Hello\n")
+    }
 }
