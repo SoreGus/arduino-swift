@@ -9,7 +9,7 @@ public func arduino_swift_main() {
     // Receive responses from R4
     i2c.onReceive { from, packet in
         print("RX from 0x")
-        printHexBytes(packet.bytes)
+        printHexBytes(from)
         print(": ")
 
         if let s = packet.asUTF8String() {
