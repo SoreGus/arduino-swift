@@ -4,7 +4,8 @@
 //
 // What this command does:
 // - Validates project structure under ARDUINO_SWIFT_ROOT (default "."):
-//     - requires: config.json, boards.json
+//     - requires: config.json
+//     - uses tool-internal: boards.json (from tool root)
 //     - ensures:  build/ directory exists
 // - Verifies required host dependencies exist in PATH:
 //     - arduino-cli
@@ -15,7 +16,7 @@
 //     - Else resolves swiftc via PATH
 //     - Confirms the toolchain supports Embedded Swift for the board’s swift_target
 //       by reading swiftc -print-target-info and checking runtimeResourcePath/embedded exists.
-// - Resolves selected board from config.json ("board") and loads board info from boards.json:
+// - Resolves selected board from config.json ("board") and loads board info from tool-internal boards.json:
 //     - fqbn, core, swift_target (default armv7-none-none-eabi), cpu (default cortex-m3)
 // - Updates Arduino core index (best-effort) and ensures the board’s Arduino core is installed,
 //   prompting the user to install if missing.
@@ -75,14 +76,17 @@ int cmd_verify(int argc, char** argv) {
   if (!root) root = ".";
 
   char config_path[512], boards_path[512], build_dir[512], env_path[512], swiftc_path_file[512];
+  // boards.json is tool-internal (resolved from the directory of the arduino-swift binary)
+  const char* tool_root = exe_dir();
+
   snprintf(config_path, sizeof(config_path), "%s/config.json", root);
-  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", root);
+  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", tool_root);
   snprintf(build_dir, sizeof(build_dir), "%s/build", root);
   snprintf(env_path, sizeof(env_path), "%s/env.sh", build_dir);
   snprintf(swiftc_path_file, sizeof(swiftc_path_file), "%s/.swiftc_path", build_dir);
 
   if (!file_exists(config_path)) die("config.json not found");
-  if (!file_exists(boards_path)) die("boards.json not found");
+  if (!file_exists(boards_path)) die("boards.json not found (tool root): %s", boards_path);
   ensure_dir(build_dir);
 
   ensure_cmd_exists("arduino-cli");

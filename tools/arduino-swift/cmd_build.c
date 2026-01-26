@@ -4,7 +4,8 @@
 // ArduinoSwift build orchestrator.
 //
 // What this file does (high level):
-// - Reads <project_root>/config.json and <project_root>/boards.json.
+// - Reads <project_root>/config.json and <tool_root>/boards.json.
+//   (boards.json is shipped with arduino-swift to guarantee supported boards.)
 // - Prepares an Arduino sketch workspace at: <project_root>/build/sketch
 //   by copying the runtime sketch template + shim/support sources.
 // - Compiles Swift (runtime core + selected Swift libs + project main.swift)
@@ -27,6 +28,7 @@
 //
 // Config.json keys used:
 // - "board": string (must exist in boards.json)
+//   NOTE: boards.json is resolved from <tool_root>/boards.json (not the project directory).
 // - "lib": ["I2C", "Button", "SSD1306", ...]          // Swift libs
 // - "arduino_lib": ["SSD1306Ascii", ...]             // external Arduino libs
 // - "arduino_lib_dir": "/path/to/Arduino/libraries"  // optional override
@@ -531,14 +533,16 @@ int cmd_build(int argc, char** argv) {
   char build_dir[1024], sketch_dir[1024], ard_build[1024];
 
   snprintf(config_path, sizeof(config_path), "%s/config.json", project_root);
-  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", project_root);
+  // boards.json is shipped with the tool (tool root), not per-project.
+  // This guarantees we only build against boards known to work with ArduinoSwift.
+  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", tool_root);
 
   snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
   snprintf(sketch_dir, sizeof(sketch_dir), "%s/sketch", build_dir);
   snprintf(ard_build, sizeof(ard_build), "%s/arduino_build", build_dir);
 
   if (!file_exists(config_path)) die("config.json not found at: %s", config_path);
-  if (!file_exists(boards_path)) die("boards.json not found at: %s", boards_path);
+  if (!file_exists(boards_path)) die("boards.json not found at tool root: %s", boards_path);
 
   // Dependencies
   if (run_cmd("command -v arduino-cli >/dev/null 2>&1") != 0) die("Missing dependency: arduino-cli");
