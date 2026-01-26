@@ -1,3 +1,65 @@
+
+// cmd_build.c
+// Ensure util.h is included before any code that calls dir_exists, run_cmd_capture, or path_join
+#include "util.h"
+#include "jsonlite.h"
+
+#include <stddef.h>   // size_t
+#include <stdio.h>    // snprintf
+#include <string.h>   // strncpy, strchr, strcmp
+#include <stdlib.h>
+#include <ctype.h>
+
+static int str_ieq(const char* a, const char* b);
+// -----------------------------
+// External Arduino library resolver
+// -----------------------------
+
+// Resolve actual directory name under <base> matching libName (case-insensitive).
+// Writes:
+// - out_dir: full path to resolved dir
+// - out_leaf: resolved leaf folder name (actual casing)
+static int resolve_external_arduino_lib_dir(const char* base,
+                                            const char* libName,
+                                            char* out_dir, size_t out_dir_cap,
+                                            char* out_leaf, size_t out_leaf_cap) {
+  if (!base || !base[0]) return 0;
+  if (!dir_exists(base)) return 0;
+
+  char cmd[2048];
+  snprintf(cmd, sizeof(cmd), "ls -1 \"%s\" 2>/dev/null", base);
+
+  char listing[65535];
+  if (run_cmd_capture(cmd, listing, sizeof(listing)) != 0) return 0;
+  if (!listing[0]) return 0;
+
+  char* p = listing;
+  while (*p) {
+    char* e = strchr(p, '\n');
+    if (e) *e = 0;
+
+    if (p[0]) {
+      char cand[1024];
+      if (path_join(cand, sizeof(cand), base, p) && dir_exists(cand)) {
+        if (str_ieq(p, libName)) {
+          strncpy(out_dir, cand, out_dir_cap - 1);
+          out_dir[out_dir_cap - 1] = 0;
+
+          if (out_leaf && out_leaf_cap) {
+            strncpy(out_leaf, p, out_leaf_cap - 1);
+            out_leaf[out_leaf_cap - 1] = 0;
+          }
+          return 1;
+        }
+      }
+    }
+
+    if (!e) break;
+    p = e + 1;
+  }
+
+  return 0;
+}
 // cmd_build.c
 // - Compiles Swift (core + selected libs) into a single .o
 // - Copies sketch + C/C++ shim files into build/sketch
@@ -22,14 +84,6 @@
 //   Example: arduino/libs/I2C/I2C.c -> copied to build/sketch/libraries/I2C/I2C.c
 // - Swift core must not duplicate typealias/decls that also exist in libs.
 //   (that is fixed in Swift code, not here)
-
-#include "util.h"
-#include "jsonlite.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
 
 // -----------------------------
 // Filesystem helpers
@@ -268,6 +322,38 @@ static void copy_arduino_lib_recursive(const char* src_lib_dir, const char* dst_
   }
 }
 
+// Copy C/C++ files from a Swift lib into sketch/libraries/<LIB>/
+// This promotes Swift-owned C/C++ bridges to Arduino build units.
+static void copy_swift_lib_c_cpp(const char* swift_lib_dir,
+                                 const char* sketch_dir,
+                                 const char* leaf) {
+  char dst_libdir[1024];
+  snprintf(dst_libdir, sizeof(dst_libdir), "%s/libraries/%s", sketch_dir, leaf);
+
+  // Create destination
+  {
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", dst_libdir);
+    if (run_cmd(cmd) != 0) die("Failed to mkdir: %s", dst_libdir);
+  }
+
+  // Copy only .c/.cpp/.h recursively (bridges, headers)
+  {
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd),
+      "cd \"%s\" && find . -type f \\( -name \"*.c\" -o -name \"*.cpp\" -o -name \"*.h\" \\) -print "
+      "| sed 's|^\\./||' "
+      "| while read f; do "
+      "  mkdir -p \"%s/$(dirname \"$f\")\"; "
+      "  cp \"%s/$f\" \"%s/$f\"; "
+      "done",
+      swift_lib_dir,
+      dst_libdir, swift_lib_dir, dst_libdir
+    );
+    if (run_cmd(cmd) != 0) die("Failed to copy Swift lib C/C++ from %s", swift_lib_dir);
+  }
+}
+
 // Return 1 if a file exists in <dir>/<leaf>.<ext>
 static int lib_has_entry_file(const char* lib_dir, const char* leaf, const char* ext) {
   char p[1024];
@@ -452,6 +538,30 @@ int cmd_build(int argc, char** argv) {
   char* bjs = read_file(boards_path);
   if (!cfg || !bjs) die("Failed to read config/boards json");
 
+  // --- Optional: arduino_lib_dir (from config.json or default) ---
+  char user_arduino_lib_dir[1024] = {0};
+  if (!json_get_string(cfg, "arduino_lib_dir", user_arduino_lib_dir, sizeof(user_arduino_lib_dir))) {
+    // Default: $HOME/Documents/Arduino/libraries
+    const char* home = getenv("HOME");
+    if (home && home[0]) {
+      snprintf(user_arduino_lib_dir, sizeof(user_arduino_lib_dir), "%s/Documents/Arduino/libraries", home);
+      if (!dir_exists(user_arduino_lib_dir)) {
+        user_arduino_lib_dir[0] = 0; // skip silently if not found
+      }
+    }
+  }
+
+  // --- Optional: arduino_lib array from config.json ---
+  char arduino_libs[64][64];
+  int arduino_lib_count = 0;
+  {
+    // Parse "arduino_lib": [ ... ] array
+    const char* k = strstr(cfg, "\"arduino_lib\"");
+    if (k) {
+      arduino_lib_count = parse_lib_array(cfg, arduino_libs, 64);
+    }
+  }
+
   // -----------------------------
   // Board selection
   // -----------------------------
@@ -544,13 +654,36 @@ int cmd_build(int argc, char** argv) {
     const char* libname = libs[i];
     if (!libname || !libname[0]) continue;
 
-    // --- Swift lib dir
+    // --- Swift lib dir (runtime OR project-local)
     char swift_libdir[1024];
-    char swift_leaf[64]={0};
-    if (!resolve_swift_lib_dir(runtime_swift, libname,
-                               swift_libdir, sizeof(swift_libdir),
-                               swift_leaf, sizeof(swift_leaf))) {
-      die("Swift lib not found: %s (expected in %s/libs/<LIB>/)", libname, runtime_swift);
+    char swift_leaf[64] = {0};
+    int found_swift = 0;
+
+    // 1) Runtime Swift lib
+    if (resolve_swift_lib_dir(runtime_swift, libname,
+                              swift_libdir, sizeof(swift_libdir),
+                              swift_leaf, sizeof(swift_leaf))) {
+      found_swift = 1;
+    }
+
+    // 2) Project-local Swift lib: <project_root>/libs/<LIB>/
+    if (!found_swift) {
+      char project_swift_root[1024];
+      if (path_join(project_swift_root, sizeof(project_swift_root), project_root, "libs")
+          && dir_exists(project_swift_root)) {
+
+        if (resolve_external_arduino_lib_dir(project_swift_root, libname,
+                                             swift_libdir, sizeof(swift_libdir),
+                                             swift_leaf, sizeof(swift_leaf))) {
+          found_swift = 1;
+          ok("Using project-local Swift lib: %s (%s)", swift_leaf, swift_libdir);
+        }
+      }
+    }
+
+    if (!found_swift) {
+      die("Swift lib not found: %s (expected in %s/libs/<LIB>/ or <project>/libs/<LIB>/)",
+          libname, runtime_swift);
     }
 
     char find_lib_cmd[2048];
@@ -567,6 +700,24 @@ int cmd_build(int argc, char** argv) {
 
     ok("Adding Swift lib: %s (%s)", swift_leaf[0] ? swift_leaf : libname, swift_libdir);
     append_swift_list_as_args(lib_list, swift_args, sizeof(swift_args));
+
+    // Promote Swift-lib-owned C/C++ (bridges) into Arduino build
+    {
+      const char* leaf = (swift_leaf[0] ? swift_leaf : libname);
+      ok("Promoting Swift C/C++ for lib: %s", leaf);
+      copy_swift_lib_c_cpp(swift_libdir, sketch_dir, leaf);
+
+      // Track leaf for force-compilation (avoid duplicates)
+      int dup = 0;
+      for (int k = 0; k < resolved_count; ++k) {
+        if (str_ieq(resolved_leafs[k], leaf)) { dup = 1; break; }
+      }
+      if (!dup && resolved_count < 64) {
+        strncpy(resolved_leafs[resolved_count], leaf, 63);
+        resolved_leafs[resolved_count][63] = 0;
+        resolved_count++;
+      }
+    }
 
     // --- Arduino lib dir (optional: Swift-only libs are allowed)
     char arduino_libdir[1024];
@@ -599,10 +750,58 @@ int cmd_build(int argc, char** argv) {
 
     // Track leaf unconditionally (do NOT require <LIB>.h).
     // We copy the whole directory and then force-compile every .c/.cpp inside it.
-    if (resolved_count < 64) {
+    // Avoid duplicates
+    int dup = 0;
+    for (int k = 0; k < resolved_count; ++k) {
+      if (str_ieq(resolved_leafs[k], leaf)) { dup = 1; break; }
+    }
+    if (!dup && resolved_count < 64) {
       strncpy(resolved_leafs[resolved_count], leaf, 63);
       resolved_leafs[resolved_count][63] = 0;
       resolved_count++;
+    }
+  }
+
+  // --- Copy user-specified arduino_libs from arduino_lib_dir ---
+  if (user_arduino_lib_dir[0] && arduino_lib_count > 0) {
+    ok("Including %d user Arduino lib(s) from %s", arduino_lib_count, user_arduino_lib_dir);
+    for (int i = 0; i < arduino_lib_count; i++) {
+      const char* libname = arduino_libs[i];
+      if (!libname || !libname[0]) continue;
+
+      char ext_libdir[1024];
+      char ext_leaf[64] = {0};
+      if (!resolve_external_arduino_lib_dir(user_arduino_lib_dir, libname,
+                                            ext_libdir, sizeof(ext_libdir),
+                                            ext_leaf, sizeof(ext_leaf))) {
+        ok("User Arduino lib not found: %s (skipping)", libname);
+        continue;
+      }
+      // Copy into build/sketch/libraries/<ResolvedLeaf>/
+      char dst_libdir[1024];
+      const char* leaf = (ext_leaf[0] ? ext_leaf : libname);
+      snprintf(dst_libdir, sizeof(dst_libdir), "%s/libraries/%s", sketch_dir, leaf);
+      ok("Copying user Arduino lib: %s (%s -> %s)", leaf, ext_libdir, dst_libdir);
+      copy_arduino_lib_recursive(ext_libdir, dst_libdir);
+      // Sanity log: list top-level contents of the copied lib directory
+      {
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd),
+          "echo \"[user-lib:%s] files:\"; ls -1 \"%s\" 2>/dev/null || true",
+          leaf, dst_libdir
+        );
+        run_cmd(cmd);
+      }
+      // Track leaf unconditionally, avoid duplicates
+      int dup = 0;
+      for (int k = 0; k < resolved_count; ++k) {
+        if (str_ieq(resolved_leafs[k], leaf)) { dup = 1; break; }
+      }
+      if (!dup && resolved_count < 64) {
+        strncpy(resolved_leafs[resolved_count], leaf, 63);
+        resolved_leafs[resolved_count][63] = 0;
+        resolved_count++;
+      }
     }
   }
 
@@ -670,7 +869,7 @@ int cmd_build(int argc, char** argv) {
     "--build-path \"%s\" "
     "--build-property \"compiler.c.extra_flags=-fno-short-enums\" "
     "--build-property \"compiler.cpp.extra_flags=-fno-short-enums\" "
-    "--build-property \"compiler.c.elf.extra_flags=%s\" "
+    "--build-property \"compiler.c.elf.extra_flags=%s -Wl,--start-group -lgcc -lc -lnosys -Wl,--end-group\" "
     "\"%s\"",
     fqbn,
     ard_build,

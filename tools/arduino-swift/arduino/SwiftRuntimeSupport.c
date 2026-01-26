@@ -160,3 +160,9 @@ void swift_fatalError(const char *message, intptr_t len) {
 #if defined(__cplusplus)
 } // extern "C"
 #endif
+
+// ---- Required by newlib (_sbrk) when linking Swift objects ----
+
+// Provided by linker script normally, but missing when injecting Swift .o
+__attribute__((used))
+char end;
