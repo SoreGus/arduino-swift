@@ -80,3 +80,7 @@ Thumbs.db
 # Uncomment if you want local-only configs
 # config.local.json
 # boards.local.json
+
+# bins
+
+**/arduino-swift
