@@ -10,13 +10,13 @@ public func arduino_swift_main() {
     // Receive responses from R4
     i2c.onReceive { from, packet in
         Serial.print("RX from 0x")
-        I2C.Print.hex2(from)
+        Serial.printHexBytes(packet.bytes)
         Serial.print(": ")
 
         if let s = packet.asUTF8String() {
             Serial.print(s)
         } else {
-            I2C.Print.hexBytes(packet.bytes)
+            Serial.printHexBytes(packet.bytes)
         }
         Serial.print("\n")
     }
@@ -24,7 +24,7 @@ public func arduino_swift_main() {
     // Optional error logging
     i2c.onError { addr, status in
         Serial.print("I2C error to 0x")
-        I2C.Print.hex2(addr)
+        Serial.printHex2(addr)
         Serial.print(" status=")
         Serial.print(status.name)
         Serial.print("\n")

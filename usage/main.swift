@@ -20,6 +20,5 @@ public func arduino_swift_main() {
     )
 
     ArduinoRuntime.add(button)
-
     ArduinoRuntime.keepAlive()
 }

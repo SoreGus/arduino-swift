@@ -4,16 +4,13 @@
 
 @_silgen_name("arduino_swift_main")
 public func arduino_swift_main() {
-    // Serial only for debug (optional)
     Serial.begin(115200)
     Serial.print("Swift main boot\n")
 
-    // Builtin LED
     let led = PIN.builtin
     led.output()
     led.off()
 
-    // Button on pin 5 (pullup by default)
     let button = Button(
         5,
         onPress: {
@@ -22,9 +19,6 @@ public func arduino_swift_main() {
         }
     )
 
-    // Add button to runtime
     ArduinoRuntime.add(button)
-
-    // Keep runtime alive
     ArduinoRuntime.keepAlive()
 }
