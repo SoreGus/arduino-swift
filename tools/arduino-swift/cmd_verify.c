@@ -1,3 +1,37 @@
+// cmd_verify.c
+//
+// Environment + toolchain verification for ArduinoSwift.
+//
+// What this command does:
+// - Validates project structure under ARDUINO_SWIFT_ROOT (default "."):
+//     - requires: config.json, boards.json
+//     - ensures:  build/ directory exists
+// - Verifies required host dependencies exist in PATH:
+//     - arduino-cli
+//     - python3
+// - Ensures Swift toolchain discovery works (Embedded Swift):
+//     - Prefers SWIFTC env var if set
+//     - Else tries: $HOME/.swiftly/bin/swiftc
+//     - Else resolves swiftc via PATH
+//     - Confirms the toolchain supports Embedded Swift for the board’s swift_target
+//       by reading swiftc -print-target-info and checking runtimeResourcePath/embedded exists.
+// - Resolves selected board from config.json ("board") and loads board info from boards.json:
+//     - fqbn, core, swift_target (default armv7-none-none-eabi), cpu (default cortex-m3)
+// - Updates Arduino core index (best-effort) and ensures the board’s Arduino core is installed,
+//   prompting the user to install if missing.
+// - Writes build-time exports for downstream commands:
+//     - build/.swiftc_path  (exact swiftc path used by build step)
+//     - build/env.sh        (exports SWIFTC, board/fqbn/core, swift target + cpu)
+//
+// Output artifacts (under <root>/build):
+// - env.sh        : shell exports to reproduce a verified environment
+// - .swiftc_path  : single-line swiftc path consumed by cmd_build
+//
+// Notes:
+// - Verification is intentionally lightweight and uses shell commands for portability.
+// - If Embedded Swift is unavailable for the target, cmd_verify fails with guidance to
+//   install a suitable toolchain (e.g., via swiftly main-snapshot) or set SWIFTC explicitly.
+
 #include "util.h"
 #include "jsonlite.h"
 #include <stdio.h>

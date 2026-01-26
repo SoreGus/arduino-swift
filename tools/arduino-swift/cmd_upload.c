@@ -1,3 +1,40 @@
+// cmd_upload.c
+//
+// Firmware upload command for ArduinoSwift.
+//
+// What this command does:
+// - Loads project configuration from ARDUINO_SWIFT_ROOT (default "."):
+//     - reads: config.json (expects "board")
+//     - reads: boards.json (resolves board -> fqbn)
+// - Validates build artifacts exist before uploading:
+//     - requires: <root>/build/arduino_build (produced by `arduino-swift build`)
+// - Chooses a serial port to upload to:
+//     - If environment variable PORT is set, it is used as-is.
+//     - Otherwise, it auto-detects a suitable port by parsing `arduino-cli board list`:
+//         - First tries JSON output (`--format json`) and searches for entries whose
+//           surrounding object matches the selected fqbn (or its base token).
+//         - Prefers USB-like ports (usbmodem/usbserial/ttyACM/ttyUSB).
+//         - Rejects pseudo-ports such as Bluetooth/Incoming/rfcomm/debug-console.
+//     - If no good port is found, it fails with instructions to set PORT explicitly.
+// - Executes the upload using Arduino CLI:
+//     - arduino-cli upload -p <PORT> --fqbn <FQBN> --input-dir <build/arduino_build> <build/sketch>
+//
+// Port detection rules (important):
+// - Bluetooth / network / “Incoming” ports are ignored to prevent accidental uploads.
+// - USB serial ports are preferred because they are the most likely valid targets.
+// - If the system reports multiple boards, the matching logic attempts to pick the one
+//   associated with the selected fqbn.
+//
+// Expected environment:
+// - arduino-cli must be installed and available in PATH.
+// - A successful `arduino-swift build` must have been run beforehand.
+//
+// Usage examples:
+// - Auto-detect port:
+//     arduino-swift upload
+// - Force a specific port:
+//     PORT=/dev/cu.usbmodemXXXX arduino-swift upload
+
 #include "util.h"
 #include "jsonlite.h"
 #include <stdio.h>

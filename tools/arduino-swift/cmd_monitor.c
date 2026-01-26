@@ -1,3 +1,36 @@
+// cmd_monitor.c
+//
+// Serial monitor command for ArduinoSwift.
+//
+// What this command does:
+// - Opens a serial monitor using `arduino-cli monitor`.
+// - Determines the serial port and baud rate using the following rules:
+//
+// Port selection (in priority order):
+// 1) If environment variable PORT is set, it is used directly.
+// 2) Otherwise, attempts automatic detection via `arduino-cli board list`:
+//    - Prefers the "Arduino Due Programming Port" if present.
+//    - Falls back to the first detected board entry (second line of the list).
+// 3) If no port can be determined, the command fails and instructs the user
+//    to set PORT explicitly.
+//
+// Baud rate selection:
+// - If environment variable BAUD is set, it is used.
+// - Otherwise defaults to 115200.
+//
+// Behavior notes:
+// - Uses `arduino-cli monitor` directly (no piping / no tee).
+// - Ctrl+C works correctly to exit the monitor.
+// - Intended for quick inspection of Serial output after upload.
+//
+// Usage examples:
+// - Auto-detect port, default baud:
+//     arduino-swift monitor
+// - Specify port:
+//     PORT=/dev/cu.usbmodemXXXX arduino-swift monitor
+// - Specify port and baud rate:
+//     PORT=/dev/cu.usbmodemXXXX BAUD=9600 arduino-swift monitor
+
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>

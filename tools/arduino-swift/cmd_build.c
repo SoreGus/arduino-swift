@@ -1,6 +1,52 @@
 
 // cmd_build.c
-// Ensure util.h is included before any code that calls dir_exists, run_cmd_capture, or path_join
+//
+// ArduinoSwift build orchestrator.
+//
+// What this file does (high level):
+// - Reads <project_root>/config.json and <project_root>/boards.json.
+// - Prepares an Arduino sketch workspace at: <project_root>/build/sketch
+//   by copying the runtime sketch template + shim/support sources.
+// - Compiles Swift (runtime core + selected Swift libs + project main.swift)
+//   into a single object file: build/sketch/ArduinoSwiftApp.o
+// - Stages Arduino-side libraries into: build/sketch/libraries/<LIB>/
+//   from TWO possible sources:
+//     (1) Tool runtime: <tool_root>/arduino/libs/<LIB>/
+//     (2) User Arduino libraries directory: <arduino_lib_dir>/<LIB>/
+//         - arduino_lib_dir defaults to: $HOME/Documents/Arduino/libraries
+//         - may be overridden via "arduino_lib_dir" in config.json
+// - Promotes any C/C++ bridge code that lives INSIDE a Swift lib folder
+//   (project-local or runtime Swift lib) into the Arduino build by copying
+//   *.c/*.cpp/*.h into build/sketch/libraries/<LIB>/, preserving subfolders.
+// - Generates build/sketch/ArduinoSwiftLibs.cpp which FORCE-COMPILES every
+//   .c/.cpp file found under build/sketch/libraries/<LIB>/ recursively.
+//   This bypasses Arduino CLI's heuristic library discovery and prevents
+//   "undefined reference" link errors when libs are staged locally.
+// - Invokes arduino-cli compile using the selected board FQBN, injecting the
+//   Swift object via compiler.c.elf.extra_flags.
+//
+// Config.json keys used:
+// - "board": string (must exist in boards.json)
+// - "lib": ["I2C", "Button", "SSD1306", ...]          // Swift libs
+// - "arduino_lib": ["SSD1306Ascii", ...]             // external Arduino libs
+// - "arduino_lib_dir": "/path/to/Arduino/libraries"  // optional override
+//
+// Notes / Constraints:
+// - Lib name resolution is case-insensitive, but preserves actual folder casing.
+// - Swift libs may exist in either:
+//     <tool_root>/swift/libs/<LIB>/
+//     <project_root>/libs/<LIB>/
+// - Arduino libs may exist in either:
+//     <tool_root>/arduino/libs/<LIB>/
+//     <arduino_lib_dir>/<LIB>/
+// - The final Arduino CLI link is forced to include libgcc/libc/libnosys via a
+//   start-group/end-group wrapper to reduce missing runtime symbols when Swift
+//   objects are injected.
+//
+// Important:
+// - This file intentionally prefers deterministic, explicit compilation over
+//   Arduino CLI auto-detection, to make Swift + Arduino builds reliable.
+
 #include "util.h"
 #include "jsonlite.h"
 
