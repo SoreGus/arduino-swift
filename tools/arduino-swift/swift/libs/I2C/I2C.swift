@@ -210,61 +210,6 @@ public enum I2C {
     }
 
     // ------------------------------------------------------------
-    // MARK: - Print helpers (zero/low allocation)
-    // ------------------------------------------------------------
-    public enum Print {
-
-        @inline(__always)
-        static func nibbleHex(_ v: UInt8) -> UInt8 {
-            let x = v & 0x0F
-            return x < 10 ? (UInt8(ascii: "0") + x) : (UInt8(ascii: "A") + (x - 10))
-        }
-
-        /// Print one byte as 2 hex characters using arduino_serial_print_cstr
-        @inline(__always)
-        public static func hex2(_ b: UInt8) {
-            let hi = nibbleHex(b >> 4)
-            let lo = nibbleHex(b)
-            let s: [UInt8] = [hi, lo, 0]
-            s.withUnsafeBufferPointer { buf in
-                buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: 3) { cstr in
-                    arduino_serial_print_cstr(cstr)
-                }
-            }
-        }
-
-        /// Print bytes like: "01 02 0A FF "
-        public static func hexBytes(_ bytes: [UInt8]) {
-            for b in bytes {
-                hex2(b)
-                Serial.print(" ")
-            }
-        }
-
-        @inline(__always)
-        public static func isPrintableASCII(_ b: UInt8) -> Bool {
-            b >= 0x20 && b <= 0x7E
-        }
-
-        /// Print bytes as ASCII when possible, otherwise hex.
-        public static func asciiOrHex(_ bytes: [UInt8]) {
-            for b in bytes {
-                if isPrintableASCII(b) {
-                    let s: [UInt8] = [b, 0]
-                    s.withUnsafeBufferPointer { buf in
-                        buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: 2) { cstr in
-                            arduino_serial_print_cstr(cstr)
-                        }
-                    }
-                } else {
-                    hex2(b)
-                    Serial.print(" ")
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------
     // MARK: - Master (low-level)
     // ------------------------------------------------------------
     public struct Master: Sendable {

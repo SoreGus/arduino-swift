@@ -77,6 +77,24 @@ public enum Serial {
         arduino_serial_print_f64(Double(v))
     }
 
+    public static func printHexBytes(_ bytes: [UInt8]) {
+        for b in bytes {
+            printHex2(b)
+            print(" ")
+        }
+    }
+
+    public static func printASCIIOrHex(_ bytes: [UInt8]) {
+        for b in bytes {
+            if b >= 0x20 && b <= 0x7E {
+                write(b)
+            } else {
+                printHex2(b)
+                print(" ")
+            }
+        }
+    }
+
     // MARK: - println sugar
 
     @inline(__always)
