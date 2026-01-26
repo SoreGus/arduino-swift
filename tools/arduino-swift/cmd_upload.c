@@ -207,21 +207,41 @@ static int detect_port_for_fqbn(const char* fqbn, char* out, size_t cap) {
 int cmd_upload(int argc, char** argv) {
   (void)argc; (void)argv;
 
-  const char* root = getenv("ARDUINO_SWIFT_ROOT");
-  if (!root) root = ".";
+  // Project root:
+  // - If ARDUINO_SWIFT_ROOT is set, use it.
+  // - Otherwise, assume the user is running the command from the project directory.
+  //   (This matches cmd_build.c behavior and prevents "Failed to read json" when running
+  //    `arduino-swift upload` from outside the project folder.)
+  char project_root[1024] = {0};
+  const char* env_root = getenv("ARDUINO_SWIFT_ROOT");
+  if (env_root && env_root[0]) {
+    strncpy(project_root, env_root, sizeof(project_root)-1);
+  } else {
+    if (!cwd_dir(project_root, sizeof(project_root))) {
+      strncpy(project_root, ".", sizeof(project_root)-1);
+    }
+  }
 
+  // Project config lives in the user project root
   char config_path[512], boards_path[512], build_dir[512], sketch_dir[512], ard_build[512];
-  snprintf(config_path, sizeof(config_path), "%s/config.json", root);
-  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", root);
-  snprintf(build_dir, sizeof(build_dir), "%s/build", root);
+  snprintf(config_path, sizeof(config_path), "%s/config.json", project_root);
+
+  // boards.json is owned by the tool (not the user project)
+  const char* tool_root = exe_dir();
+  snprintf(boards_path, sizeof(boards_path), "%s/boards.json", tool_root);
+
+  snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
   snprintf(sketch_dir, sizeof(sketch_dir), "%s/sketch", build_dir);
   snprintf(ard_build, sizeof(ard_build), "%s/arduino_build", build_dir);
 
-  if (!dir_exists(ard_build)) die("Build output not found. Run: arduino-swift build");
+  if (!dir_exists(ard_build)) die("Build output not found at: %s\nRun: arduino-swift build", ard_build);
+
+  if (!file_exists(config_path)) die("config.json not found at: %s", config_path);
+  if (!file_exists(boards_path)) die("Tool boards.json not found at: %s", boards_path);
 
   char* cfg = read_file(config_path);
   char* bjs = read_file(boards_path);
-  if (!cfg || !bjs) die("Failed to read json");
+  if (!cfg || !bjs) die("Failed to read json (config=%s boards=%s)", config_path, boards_path);
 
   char board[128]={0};
   if (!json_get_string(cfg, "board", board, sizeof(board))) die("config.json missing board");
