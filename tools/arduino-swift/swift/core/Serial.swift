@@ -9,11 +9,22 @@
 
 public enum Serial {
 
+    // MARK: - Internal state
+
+    @usableFromInline
+    static var _isInitialized: Bool = false
+
     // MARK: - Begin
 
     @inline(__always)
     public static func begin(_ baud: U32) {
         arduino_serial_begin(baud)
+        _isInitialized = true
+    }
+
+    @inline(__always)
+    public static func isInitialized() -> Bool {
+        _isInitialized
     }
 
     // MARK: - print overloads

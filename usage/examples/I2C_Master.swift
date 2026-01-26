@@ -2,43 +2,42 @@
 
 @_silgen_name("arduino_swift_main")
 public func arduino_swift_main() {
-    Serial.begin(115200)
-    Serial.print("Due Master boot\n")
+    print("Due Master boot\n")
 
     let i2c = I2C.Bus(clockHz: 100_000)
 
     // Receive responses from R4
     i2c.onReceive { from, packet in
-        Serial.print("RX from 0x")
-        Serial.printHexBytes(packet.bytes)
-        Serial.print(": ")
+        print("RX from 0x")
+        printHexBytes(packet.bytes)
+        print(": ")
 
         if let s = packet.asUTF8String() {
-            Serial.print(s)
+            print(s)
         } else {
-            Serial.printHexBytes(packet.bytes)
+            printHexBytes(packet.bytes)
         }
-        Serial.print("\n")
+        print("\n")
     }
 
     // Optional error logging
     i2c.onError { addr, status in
-        Serial.print("I2C error to 0x")
-        Serial.printHex2(addr)
-        Serial.print(" status=")
-        Serial.print(status.name)
-        Serial.print("\n")
+        print("I2C error to 0x")
+        printHex2(addr)
+        print(" status=")
+        print(status.name)
+        print("\n")
     }
 
     // Button on pin 5 -> LED ON
-    let btnOn = Button(5, onPress: {
-        Serial.print("Button 5 pressed -> LED ON\n")
+    let btnOn = Button(pinNumber: 5, onPress: {
+        print("Button 5 pressed -> LED ON\n")
         _ = i2c.send(to: 0x12, "LED_ON")
     })
 
     // Button on pin 6 -> LED OFF
-    let btnOff = Button(6, onPress: {
-        Serial.print("Button 6 pressed -> LED OFF\n")
+    let btnOff = Button(pinNumber: 6, onPress: {
+        print("Button 6 pressed -> LED OFF\n")
         _ = i2c.send(to: 0x12, "LED_OFF")
     })
 

@@ -42,7 +42,7 @@ public final class Button: ArduinoTickable {
     // MARK: - Init
 
     public init(
-        _ pinNumber: Int,
+        pinNumber: Int,
         onPress: (() -> Void)? = nil,
         onRelease: (() -> Void)? = nil
     ) {
