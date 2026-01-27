@@ -1,8 +1,8 @@
 // ArduinoRuntime.swift
-// Super minimal runtime:
+// Tiny cooperative runtime:
 // - Register tickables with ArduinoRuntime.add(...)
-// - Call ArduinoRuntime.keepAlive() or ArduinoRuntime.keepAlive { ... }
-// - Use ArduinoRuntime.delay(ms:) inside keepAlive body (cooperative delay)
+// - Use ArduinoRuntime.keepAlive() (or keepAlive { ... })
+// - Use ArduinoRuntime.delay(ms:) for cooperative delays that keep ticking
 
 public protocol ArduinoTickable: AnyObject {
     func tick()
@@ -45,7 +45,7 @@ public enum ArduinoRuntime {
     }
 
     // --------------------------------------------------
-    // keepAlive: custom loop body (non-blocking IF you use ArduinoRuntime.delay)
+    // keepAlive: custom loop body
     // --------------------------------------------------
     @inline(__always)
     public static func keepAlive(_ body: () -> Void) -> Never {

@@ -1,10 +1,10 @@
 // AnalogPIN.swift
-// High-level analog pin wrapper for Embedded Swift + Arduino Core.
+// High-level analog pin wrapper for Embedded Swift + Arduino ABI.
 
 public final class AnalogPIN {
     public let number: U32
 
-    // Configure analog resolution once (Due: 12-bit recommended).
+    // Configure analog resolution once (board decides what it supports).
     private static var configured: Bool = false
     private static var maxValueCache: U32 = 1023
 
@@ -17,21 +17,20 @@ public final class AnalogPIN {
         if configured { return }
         configured = true
 
-        // For Due/SAM this will set ADC resolution.
+        // If a board ignores this, it's fine.
         arduino_analogReadResolution(resolutionBits)
         maxValueCache = arduino_analogMaxValue()
     }
 
     public func value() -> U32 {
-        return arduino_analogRead(number)
+        arduino_analogRead(number)
     }
 
     public func maxValue() -> U32 {
-        return AnalogPIN.maxValueCache
+        AnalogPIN.maxValueCache
     }
 
     /// Returns a normalized value in [0.0, 1.0].
-    /// Uses Double because it's usually safer across Embedded Swift toolchains.
     public func normalized() -> Double {
         let v = Double(value())
         let m = Double(maxValue())

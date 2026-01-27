@@ -1,5 +1,5 @@
 // PIN.swift
-// High-level digital pin wrapper for Embedded Swift + Arduino Core.
+// High-level digital pin wrapper for Embedded Swift + Arduino ABI.
 
 public final class PIN {
 

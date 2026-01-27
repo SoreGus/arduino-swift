@@ -1,109 +1,11 @@
 // I2C.swift
-// High-level Swift I2C (Wire) wrapper for ArduinoSwiftShim.
+// High-level Swift I2C (Wire) wrapper for ArduinoSwift ABI.
 //
 // Goals
 // -----
 // - Everything I2C-related lives here (master + slave + packet + polling devices + helpers)
 // - No top-level code. Safe with -parse-as-library.
-// - Designed to keep App.swift tiny:
-//     - create a bus/device
-//     - set closures (onReceive/onRequest/onError)
-//     - ArduinoRuntime.add(...)
-//     - ArduinoRuntime.keepAlive()
-//
-// Assumptions
-// -----------
-// - You have ArduinoRuntime.swift providing:
-//       public protocol ArduinoTickable: AnyObject { func tick() }
-//       public enum ArduinoRuntime { static func add(...); static func keepAlive() -> Never; ... }
-// - You have Serial.swift providing Serial.begin(...) and Serial.print(...) overloads
-// - ArduinoSwiftShim exposes these C symbols (defined in ArduinoSwiftShim.h/.cpp):
-//     Master (Wire):
-//       arduino_i2c_begin()
-//       arduino_i2c_setClock(hz)
-//       arduino_i2c_beginTransmission(addr)
-//       arduino_i2c_write_byte(b)
-//       arduino_i2c_write_buf(ptr,len)
-//       arduino_i2c_endTransmission(stop)
-//       arduino_i2c_requestFrom(addr, qty, stop)
-//       arduino_i2c_available()
-//       arduino_i2c_read()
-//     Slave (Wire ISR flags + buffers in shim):
-//       arduino_i2c_slave_begin(addr)
-//       arduino_i2c_slave_rx_available()
-//       arduino_i2c_slave_rx_read_buf(out,maxLen)
-//       arduino_i2c_slave_set_tx(ptr,len)
-//       arduino_i2c_slave_consume_onReceive()
-//       arduino_i2c_slave_consume_onRequest()
-//
-// Notes (important)
-// -----------------
-// - I2C is always master-driven. Slaves do NOT push data spontaneously.
-//   Therefore, "master onReceive" in this library means:
-//     - a callback invoked when *the master requests data* (requestFrom / polling)
-// - "Broadcast" does not exist at hardware level. This library implements broadcast by iterating
-//   over a list of addresses (software broadcast).
-//
-// Example (Master + polling)
-// --------------------------
-// @_silgen_name("arduino_swift_main")
-// public func arduino_swift_main() {
-//     Serial.begin(115200)
-//     Serial.print("Boot\n")
-//
-//     let bus = I2C.Bus(clockHz: 100_000)
-//
-//     // Receive data from slaves when we poll/request
-//     bus.onReceive { from, packet in
-//         Serial.print("RX from 0x")
-//         I2C.Print.hex2(from)
-//         Serial.print(": ")
-//
-//         if let s = packet.asUTF8String() {
-//             Serial.print(s)
-//             Serial.print("\n")
-//         } else {
-//             I2C.Print.hexBytes(packet.bytes)
-//             Serial.print("\n")
-//         }
-//     }
-//
-//     // Poll slave 0x12 every 50ms, expecting up to 32 bytes
-//     let poller = bus.poller(from: 0x12, count: 32, everyMs: 50)
-//     ArduinoRuntime.add(poller)
-//
-//     // Send different payload types
-//     _ = bus.send(to: 0x12, "hello")
-//     _ = bus.send(to: 0x12, Int32(10))
-//     _ = bus.send(to: 0x12, UInt8(0x01))
-//     _ = bus.send(to: 0x12, [0x01, 0x02, 0x03])
-//
-//     ArduinoRuntime.keepAlive()
-// }
-//
-// Example (Slave)
-// ---------------
-// @_silgen_name("arduino_swift_main")
-// public func arduino_swift_main() {
-//     Serial.begin(115200)
-//     Serial.print("Slave boot\n")
-//
-//     let dev = I2C.SlaveDevice(address: 0x12)
-//
-//     dev.onReceive { packet in
-//         Serial.print("Got ")
-//         Serial.print(packet.count)
-//         Serial.print(" bytes\n")
-//     }
-//
-//     dev.onRequest {
-//         // Return bytes that will be sent when master requests data
-//         return I2C.Packet(utf8: "pong")
-//     }
-//
-//     ArduinoRuntime.add(dev)
-//     ArduinoRuntime.keepAlive()
-// }
+// - Designed to keep App.swift tiny.
 
 public enum I2C {
 
@@ -188,7 +90,6 @@ public enum I2C {
 
         /// Try decode bytes as UTF-8 String (returns nil if invalid UTF-8)
         public func asUTF8String() -> String? {
-            // Embedded Swift uses the "validating:as:" form.
             String(validating: bytes, as: UTF8.self)
         }
 
@@ -218,7 +119,6 @@ public enum I2C {
         public let defaultStop: Bool
 
         // One Wire instance on Arduino: keep single begin flag.
-        // Must not be private if used by inline methods.
         static var didBegin: Bool = false
 
         public init(clockHz: UInt32 = 100_000, defaultStop: Bool = true) {
@@ -284,7 +184,6 @@ public enum I2C {
         // ----------------------
 
         /// requestFrom(addr,count,stop) then read available bytes (up to count).
-        /// Returns a Packet containing 0...count bytes depending on device response.
         public mutating func read(from address: UInt8, count: Int, sendStop: Bool? = nil) -> Packet {
             if count <= 0 { return Packet([]) }
             beginIfNeeded()
@@ -312,7 +211,7 @@ public enum I2C {
         // Master utilities
         // ----------------------
 
-        /// Classic I2C bus scan: tries each addr with beginTransmission/endTransmission.
+        /// Classic I2C bus scan
         public mutating func scan(range: ClosedRange<UInt8> = 0x08...0x77) -> [UInt8] {
             beginIfNeeded()
             var found: [UInt8] = []
@@ -324,8 +223,7 @@ public enum I2C {
             return found
         }
 
-        /// Combined "write then read" pattern:
-        /// - Useful for register-based devices: write register address, then read N bytes.
+        /// Combined "write then read" pattern.
         public mutating func writeRead(
             to address: UInt8,
             write: [UInt8],
@@ -333,7 +231,6 @@ public enum I2C {
             sendStopAfterWrite: Bool = false,
             sendStopAfterRead: Bool = true
         ) -> (status: Status, packet: Packet) {
-            // Many devices require a repeated-start: endTransmission(false) then requestFrom(..., true)
             let st = self.write(to: address, bytes: write, sendStop: sendStopAfterWrite)
             if !st.isOK {
                 return (st, Packet([]))
@@ -344,33 +241,14 @@ public enum I2C {
     }
 
     // ------------------------------------------------------------
-    // MARK: - Bus (high-level Master API with completions)
+    // MARK: - Bus (high-level Master API with callbacks)
     // ------------------------------------------------------------
-    /// High-level master bus:
-    /// - exposes send(...) overloads
-    /// - exposes request(...) overloads
-    /// - provides onReceive/onError callbacks triggered by request/pollers
-    ///
-    /// Note: Master is still synchronous (I2C is fast), but "completion" here means
-    ///       closure-based API to keep App.swift clean and uniform.
     public final class Bus {
 
-        // Underlying low-level master
         private var master: Master
 
-        // Internal storage for handlers
         private var onReceiveHandler: ((UInt8, Packet) -> Void)?
         private var onErrorHandler: ((UInt8, Status) -> Void)?
-
-        // --------------------------------------------------
-        // MARK: - Handlers (property-style + fluent-style)
-        // --------------------------------------------------
-        // Property-style:
-        //   bus.onReceive = { from, packet in ... }
-        //   bus.onError   = { addr, status in ... }
-        // Fluent-style:
-        //   bus.onReceive { from, packet in ... }
-        //   bus.onError { addr, status in ... }
 
         public var onReceive: ((UInt8, Packet) -> Void)? {
             get { onReceiveHandler }
@@ -395,7 +273,6 @@ public enum I2C {
             self.onErrorHandler = handler
             return self
         }
-
 
         @inline(__always)
         fileprivate func emitReceive(_ from: UInt8, _ packet: Packet) {
@@ -425,7 +302,7 @@ public enum I2C {
         }
 
         // ----------------------
-        // SEND overloads (Master -> Slave)
+        // SEND overloads
         // ----------------------
 
         @discardableResult
@@ -447,7 +324,6 @@ public enum I2C {
             send(to: address, Packet(int32LE: v).bytes, stop: stop)
         }
 
-        /// Convenience for integer literals (e.g. `bus.send(to: 0x12, 10)`)
         @discardableResult
         public func send(to address: UInt8, _ v: Int, stop: Bool? = nil) -> Status {
             let vv: Int32
@@ -472,7 +348,6 @@ public enum I2C {
             send(to: address, packet.bytes, stop: stop)
         }
 
-        /// Software broadcast: iterate a list of slave addresses.
         public func broadcast(to addresses: [UInt8], _ bytes: [UInt8], stop: Bool? = nil) {
             for a in addresses { _ = send(to: a, bytes, stop: stop) }
         }
@@ -482,10 +357,9 @@ public enum I2C {
         }
 
         // ----------------------
-        // REQUEST overloads (Master reads from Slave)
+        // REQUEST overloads
         // ----------------------
 
-        /// Request N bytes from a slave and return Packet.
         @discardableResult
         public func request(from address: UInt8, count: Int, stop: Bool? = nil) -> Packet {
             let pkt = master.read(from: address, count: count, sendStop: stop)
@@ -493,13 +367,11 @@ public enum I2C {
             return pkt
         }
 
-        /// Request with completion (closure).
         public func request(from address: UInt8, count: Int, stop: Bool? = nil, completion: (Packet) -> Void) {
             let pkt = request(from: address, count: count, stop: stop)
             completion(pkt)
         }
 
-        /// Write+Read convenience (register-based devices).
         public func writeRead(
             to address: UInt8,
             write: [UInt8],
@@ -526,14 +398,10 @@ public enum I2C {
         // Runtime-friendly devices
         // ----------------------
 
-        /// Create a Poller device that periodically requests bytes from a slave and fires onReceive.
         public func poller(from address: UInt8, count: Int, everyMs: UInt32) -> Poller {
             Poller(bus: self, address: address, count: count, everyMs: everyMs)
         }
 
-        /// Create a MasterTxRxDevice device:
-        /// - periodically sends payload to a slave
-        /// - optionally requests a response afterwards
         public func txRxDevice(
             to address: UInt8,
             payload: Packet,
@@ -543,7 +411,6 @@ public enum I2C {
             MasterTxRxDevice(bus: self, address: address, payload: payload, everyMs: everyMs, readCount: readCount)
         }
 
-        // Internal access for devices
         fileprivate func _sendRaw(to address: UInt8, bytes: [UInt8], stop: Bool?) -> Status {
             master.write(to: address, bytes: bytes, sendStop: stop)
         }
@@ -556,8 +423,6 @@ public enum I2C {
     // ------------------------------------------------------------
     // MARK: - Poller (ArduinoTickable)
     // ------------------------------------------------------------
-    /// Periodically requests N bytes from a single slave address.
-    /// This is the clean way to emulate "master onReceive" behavior.
     public final class Poller: ArduinoTickable {
 
         private let bus: Bus
@@ -591,8 +456,6 @@ public enum I2C {
     // ------------------------------------------------------------
     // MARK: - MasterTxRxDevice (ArduinoTickable)
     // ------------------------------------------------------------
-    /// Periodically sends a payload to slave and optionally requests a response.
-    /// Great for demos and quick device bring-up without cluttering App.swift.
     public final class MasterTxRxDevice: ArduinoTickable {
 
         public enum Mode {
@@ -632,7 +495,6 @@ public enum I2C {
             if (now &- lastMs) < everyMs { return }
             lastMs = now
 
-            // Write
             let st = bus._sendRaw(to: address, bytes: payload.bytes, stop: stopAfterWrite)
             if !st.isOK { bus.emitError(address, st) }
 
@@ -665,7 +527,6 @@ public enum I2C {
         public var onReceive: ((Packet) -> Void)?
 
         /// Called when master requests data. Return payload to send.
-        /// If nil => send empty payload.
         public var onRequest: (() -> Packet)?
 
         public init(address: UInt8) {
@@ -681,12 +542,10 @@ public enum I2C {
         public func tick() {
             if !didBegin { begin() }
 
-            // On receive
             if arduino_i2c_slave_consume_onReceive() != 0 {
                 drainReceiveAndCallback()
             }
 
-            // On request
             if arduino_i2c_slave_consume_onRequest() != 0 {
                 prepareTxFromCallback()
             }
@@ -739,17 +598,8 @@ public enum I2C {
     }
 
     // ------------------------------------------------------------
-    // MARK: - SlaveDevice (nice ergonomic wrapper)
+    // MARK: - SlaveDevice (ergonomic wrapper)
     // ------------------------------------------------------------
-    /// Convenience wrapper over Slave that adds:
-    /// - typed send helpers for onRequest
-    /// - typed decoding helpers for onReceive
-    ///
-    /// Usage:
-    ///   let dev = I2C.SlaveDevice(address: 0x12)
-    ///   dev.onReceive { pkt in ... }
-    ///   dev.onRequest { I2C.Packet(utf8: "pong") }
-    ///   ArduinoRuntime.add(dev)
     public final class SlaveDevice: ArduinoTickable {
 
         private let slave: Slave
@@ -792,6 +642,21 @@ public enum I2C {
 
         public func respondUTF8(_ s: String) {
             slave.onRequest = { Packet(utf8: s) }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // MARK: - Print helpers (no heap, just Serial)
+    // ------------------------------------------------------------
+    public enum Print {
+        @inline(__always)
+        public static func hex2(_ b: UInt8) {
+            Serial.printHex2(b)
+        }
+
+        @inline(__always)
+        public static func hexBytes(_ bytes: [UInt8]) {
+            Serial.printHexBytes(bytes)
         }
     }
 }

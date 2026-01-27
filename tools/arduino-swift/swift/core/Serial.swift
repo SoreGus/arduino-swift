@@ -5,7 +5,7 @@
 // - print overloads for StaticString / String / numbers
 // - println sugar
 // - printHex2 for byte dumps (00..FF)
-// - write(byte) for raw printable bytes (like your old Serial.write)
+// - write(byte) for raw printable bytes
 
 public enum Serial {
 
@@ -32,7 +32,6 @@ public enum Serial {
     @inline(__always)
     public static func print(_ s: StaticString) {
         // Convert StaticString to a C string.
-        // Assumes string literals are null-terminated (usually true).
         s.withUTF8Buffer { buf in
             if buf.count > 0 && buf[buf.count - 1] == 0 {
                 buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buf.count) { cstr in
@@ -180,6 +179,7 @@ public enum Serial {
     @inline(__always)
     private static func nibbleHex(_ v: UInt8) -> UInt8 {
         let x = v & 0x0F
-        return x < 10 ? (UInt8(ascii: "0") + x) : (UInt8(ascii: "A") + (x - 10))
+        // ASCII '0' = 48, 'A' = 65
+        return x < 10 ? (48 &+ x) : (65 &+ (x &- 10))
     }
 }

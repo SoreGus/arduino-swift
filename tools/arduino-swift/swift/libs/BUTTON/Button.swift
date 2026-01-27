@@ -4,7 +4,7 @@
 //
 // Usage:
 //   let button = Button(
-//       5,
+//       pinNumber: 5,
 //       onPress: { ... },
 //       onRelease: { ... }
 //   )
@@ -85,7 +85,7 @@ public final class Button: ArduinoTickable {
         debounceMs = ms
     }
 
-    // MARK: - State query (requested)
+    // MARK: - State query
 
     /// Returns true while button is physically pressed
     public func isOn() -> Bool {
@@ -98,7 +98,7 @@ public final class Button: ArduinoTickable {
         ArduinoRuntime.add(self)
     }
 
-    // MARK: - Tick (called by runtime)
+    // MARK: - Tick
 
     public func tick() {
         guard enabled else { return }

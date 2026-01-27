@@ -1,10 +1,11 @@
-// ArduinoAPI.swift
-// C-ABI bridge declarations for ArduinoSwiftShim.h
-// (Only declarations; logic stays in Swift files or in ArduinoSwiftShim.cpp)
+// ArduinoABI.swift
+// C-ABI bridge declarations used by ArduinoSwift.
+// IMPORTANT: This file only declares symbols; implementations live on the Arduino side.
+//
+// The Arduino side must provide these symbols in its selected ABI implementation.
+// If you never *call* a symbol, the linker typically will not require it.
 
-public typealias U32 = UInt32
-public typealias I32 = Int32
-public typealias U8  = UInt8
+import Swift
 
 // ----------------------
 // Digital
@@ -109,8 +110,11 @@ public func arduino_serial_print_u32(_ v: U32) -> Void
 public func arduino_serial_print_f64(_ v: Double) -> Void
 
 // ----------------------
-// SPI (for later)
+// SPI (optional, for later)
 // ----------------------
+// If you are not using SPI yet, do not call these.
+// (Declarations are safe to keep; unresolved symbols only matter if referenced.)
+
 @_silgen_name("arduino_spi_begin")
 public func arduino_spi_begin() -> Void
 

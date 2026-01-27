@@ -1,14 +1,6 @@
-// I2C+ArduinoAPI.swift
-// C-ABI bridge declarations for ArduinoSwiftShim.h (I2C/Wire only).
-// Put this file under: swift/libs/I2C/
-//
-// This file is meant to be included only when the "I2C" lib is enabled in config.json.
-//
-// Example config.json:
-// {
-//   "board": "Due",
-//   "lib": ["I2C"]
-// }
+// I2C+ArduinoABI.swift
+// C-ABI bridge declarations for ArduinoSwift I2C library.
+// Include this file only when the I2C lib is enabled.
 
 // ----------------------
 // I2C (Wire) - Master
