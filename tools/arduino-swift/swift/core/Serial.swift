@@ -3,7 +3,6 @@
 //
 // Features:
 // - print overloads for StaticString / String / numbers
-// - println sugar
 // - printHex2 for byte dumps (00..FF)
 // - write(byte) for raw printable bytes
 
@@ -103,48 +102,6 @@ public enum Serial {
                 print(" ")
             }
         }
-    }
-
-    // MARK: - println sugar
-
-    @inline(__always)
-    public static func println() {
-        print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ s: StaticString) {
-        print(s); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ s: String) {
-        print(s); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ v: Int) {
-        print(v); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ v: Int32) {
-        print(v); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ v: UInt32) {
-        print(v); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ v: Double) {
-        print(v); print("\n")
-    }
-
-    @inline(__always)
-    public static func println(_ v: Float) {
-        print(v); print("\n")
     }
 
     // MARK: - Raw byte write (best-effort)

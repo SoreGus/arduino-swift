@@ -7,7 +7,7 @@
 // - Swift owns the lifecycle via arduino_swift_main(), with optional setup/loop hooks.
 
 #include <Arduino.h>
-#include "ArduinoSwiftShimBase.h"
+#include "ArduinoSwiftShim.h"
 
 extern "C" {
 

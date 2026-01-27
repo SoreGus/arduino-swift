@@ -6,7 +6,7 @@
 // - No Serial / Analog / IRQ / SPI here.
 
 #include <Arduino.h>
-#include "ArduinoSwiftShimBase.h"
+#include "ArduinoSwiftShim.h"
 
 extern "C" {
 

@@ -61,4 +61,4 @@ uint32_t arduino_i2c_slave_consume_onRequest(void);
 
 #ifdef __cplusplus
 } // extern "C"
-#endifs
+#endif
