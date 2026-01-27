@@ -2,6 +2,15 @@
   "Due": {
     "fqbn": "arduino:sam:arduino_due_x",
     "core": "arduino:sam",
-    "swift_target": "armv7-none-none-eabi"
+    "swift_target": "armv7-none-none-eabi",
+    "cpu": "cortex-m3"
+  },
+  "R4Minima": {
+    "fqbn": "arduino:renesas_uno:minima",
+    "core": "arduino:renesas_uno",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m4",
+    "float_abi": "hard",
+    "fpu": "fpv4-sp-d16"
   }
 }

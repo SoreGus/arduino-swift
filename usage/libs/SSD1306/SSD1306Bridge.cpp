@@ -13,6 +13,15 @@ extern "C" {
 
 void arduino_ssd1306_begin(uint8_t i2c_addr) {
   Wire.begin();
+
+  // UNO R4 (Renesas): timeout padrão pode abortar transações longas e causar “pixels aleatórios”
+  // Aumente para 10ms (ou mais, se necessário).
+#if defined(ARDUINO_ARCH_RENESAS)
+  Wire.setWireTimeout(10000);     // 10ms
+  Wire.setClock(100000);          // 100kHz (bem mais estável com level shifter)
+  delay(10);                      // dá tempo do OLED estabilizar após power-on/reset
+#endif
+
   oled.begin(&Adafruit128x64, i2c_addr);
   oled.clear();
 }
@@ -33,4 +42,4 @@ void arduino_ssd1306_print_cstr(const char* s) {
   oled.print(s);
 }
 
-}
+} // extern "C"
