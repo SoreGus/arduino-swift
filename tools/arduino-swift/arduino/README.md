@@ -18,6 +18,8 @@ Goal:
 ```
 arduino/
   common/
+    ArduinoSwiftShimBase.h
+    ArduinoSwiftShimBase.cpp
     sketch.ino
     Bridge.cpp
 
