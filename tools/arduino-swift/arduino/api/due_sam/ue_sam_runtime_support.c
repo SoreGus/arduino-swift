@@ -1,6 +1,6 @@
-// arduino/SwiftRuntimeSupport.c
+// due_sam_runtime_support.c
 //
-// Minimal runtime shims for Embedded Swift on Arduino (SAM / Due).
+// Minimal runtime shims for Embedded Swift on Arduino Due (SAM).
 // Compiled as pure C. DO NOT include Arduino.h here.
 //
 // Purpose:
@@ -9,6 +9,10 @@
 // - Keep everything deterministic and linker-safe
 //
 // This file intentionally provides ONLY what the linker complains about.
+//
+// NOTE:
+// - This is ARM-specific (EABI helpers). It is fine for Due and R4-Minima.
+// - Kept per-API to allow future divergence if a core/toolchain differs.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -57,17 +61,9 @@ int posix_memalign(void **memptr, size_t alignment, size_t size) {
 // ARM EABI memory helpers (sometimes missing in link)
 // ============================================================
 
-void __aeabi_memclr(void *dest, size_t n) {
-    memset(dest, 0, n);
-}
-
-void __aeabi_memclr4(void *dest, size_t n) {
-    memset(dest, 0, n);
-}
-
-void __aeabi_memclr8(void *dest, size_t n) {
-    memset(dest, 0, n);
-}
+void __aeabi_memclr(void *dest, size_t n)  { memset(dest, 0, n); }
+void __aeabi_memclr4(void *dest, size_t n) { memset(dest, 0, n); }
+void __aeabi_memclr8(void *dest, size_t n) { memset(dest, 0, n); }
 
 // ============================================================
 // arc4random_buf (used by Swift hashing)
@@ -161,8 +157,7 @@ void swift_fatalError(const char *message, intptr_t len) {
 } // extern "C"
 #endif
 
-// ---- Required by newlib (_sbrk) when linking Swift objects ----
-
-// Provided by linker script normally, but missing when injecting Swift .o
+// ---- Required by some newlib builds when linking Swift objects ----
+// Provided by linker script normally, but may be missing when injecting Swift .o
 __attribute__((used))
 char end;

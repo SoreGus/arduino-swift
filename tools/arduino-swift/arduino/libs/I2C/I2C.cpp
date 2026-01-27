@@ -1,14 +1,23 @@
-// arduino/libs/I2C/I2C.cpp
-// Implements the C-ABI surface for I2C (Wire).
-// Swift must never run inside ISR.
-// ISRs only buffer data and set flags.
+// I2C.cpp
+// ArduinoSwift Core - I2C (Wire) C-ABI implementation
+//
+// IMPORTANT:
+// - Swift must NOT run inside ISR.
+// - ISRs must be short and must not call Serial, delay, malloc, etc.
+// - We only buffer bytes and set flags in ISR.
+// - Main context (Swift) consumes buffers/flags.
+//
+// This file is Arduino-API-only:
+// - Includes <Arduino.h> and <Wire.h>
+// - No board-specific registers here
+// - Works across boards that implement Wire slave callbacks.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include "I2C.h"
 
 // --------------------------------------------------
-// I2C Slave (ISR-safe buffering)
+// Configurable capacities
 // --------------------------------------------------
 
 #ifndef ARDUINO_SWIFT_I2C_SLAVE_RX_CAP
@@ -18,6 +27,10 @@
 #ifndef ARDUINO_SWIFT_I2C_SLAVE_TX_CAP
 #define ARDUINO_SWIFT_I2C_SLAVE_TX_CAP 128
 #endif
+
+// --------------------------------------------------
+// Slave state (ISR-shared)
+// --------------------------------------------------
 
 static volatile uint8_t  gI2CSlaveOnReceive = 0;
 static volatile uint8_t  gI2CSlaveOnRequest = 0;
@@ -30,7 +43,7 @@ static volatile uint8_t  gI2CTxBuf[ARDUINO_SWIFT_I2C_SLAVE_TX_CAP];
 static volatile uint32_t gI2CTxLen = 0;
 
 // --------------------------------------------------
-// RX ring buffer helpers (unsafe = ISR protected)
+// RX ring buffer helpers (ISR-safe by design)
 // --------------------------------------------------
 
 static inline uint32_t i2c_rx_count_unsafe(void) {
@@ -71,22 +84,20 @@ static void i2c_onReceive_isr(int count) {
 static void i2c_onRequest_isr(void) {
   gI2CSlaveOnRequest = 1;
 
-  uint8_t  tmp[ARDUINO_SWIFT_I2C_SLAVE_TX_CAP];
-  uint32_t copyLen = 0;
-
-  noInterrupts();
-  copyLen = gI2CTxLen;
+  // In ISR context already. Main context updates TX under noInterrupts().
+  uint32_t copyLen = gI2CTxLen;
   if (copyLen > ARDUINO_SWIFT_I2C_SLAVE_TX_CAP)
     copyLen = ARDUINO_SWIFT_I2C_SLAVE_TX_CAP;
-
-  for (uint32_t i = 0; i < copyLen; i++)
-    tmp[i] = gI2CTxBuf[i];
-  interrupts();
 
   if (copyLen == 0) {
     Wire.write((uint8_t)0);
     return;
   }
+
+  // Copy to a non-volatile temp (Wire.write wants a normal pointer)
+  uint8_t tmp[ARDUINO_SWIFT_I2C_SLAVE_TX_CAP];
+  for (uint32_t i = 0; i < copyLen; i++)
+    tmp[i] = gI2CTxBuf[i];
 
   Wire.write(tmp, (size_t)copyLen);
 }
@@ -97,9 +108,9 @@ static void i2c_onRequest_isr(void) {
 
 extern "C" {
 
-// ----------------------
+// ============================================================
 // I2C (Wire) - Master
-// ----------------------
+// ============================================================
 
 void arduino_i2c_begin(void) {
   Wire.begin();
@@ -142,9 +153,9 @@ int32_t arduino_i2c_read(void) {
   return (int32_t)Wire.read();
 }
 
-// ----------------------
+// ============================================================
 // I2C (Wire) - Slave
-// ----------------------
+// ============================================================
 
 void arduino_i2c_slave_begin(uint8_t address) {
   noInterrupts();

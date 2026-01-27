@@ -1,13 +1,18 @@
-// arduino/ArduinoSwiftShim.cpp
-// Implements the C-ABI surface using Arduino core libs.
-// (I2C/Wire moved to arduino/libs/I2C)
+// due_sam_api.cpp
+// ArduinoSwift API extensions implementation for Arduino Due (SAM).
+//
+// Notes:
+// - Uses Arduino core APIs.
+// - IRQ is implemented as "flag-based slots":
+//   attachInterrupt -> ISR sets a flag -> Swift polls via arduino_irq_consume().
+// - Serial uses Serial by default. If you want Native USB on Due, you may
+//   later switch to SerialUSB here (as a board decision).
 
 #include <Arduino.h>
-#include <SPI.h>
-#include "ArduinoSwiftShim.h"
+#include "due_sam_api.h"
 
 // ----------------------------------------------
-// Analog resolution helpers (board-agnostic-ish)
+// Analog resolution helpers
 // ----------------------------------------------
 static uint32_t gAnalogBits = 10;
 
@@ -48,29 +53,6 @@ static void (*const gHandlers[ARDUINO_SWIFT_IRQ_SLOTS])() = {
 extern "C" {
 
 // ----------------------
-// Digital
-// ----------------------
-void arduino_pinMode(uint32_t pin, uint32_t mode) {
-  pinMode((uint8_t)pin, (uint8_t)mode);
-}
-void arduino_digitalWrite(uint32_t pin, uint32_t value) {
-  digitalWrite((uint8_t)pin, (uint8_t)value);
-}
-uint32_t arduino_digitalRead(uint32_t pin) {
-  return (uint32_t)digitalRead((uint8_t)pin);
-}
-
-// ----------------------
-// Timing
-// ----------------------
-void arduino_delay_ms(uint32_t ms) {
-  delay((unsigned long)ms);
-}
-uint32_t arduino_millis(void) {
-  return (uint32_t)millis();
-}
-
-// ----------------------
 // Analog
 // ----------------------
 uint32_t arduino_analogRead(uint32_t pin) {
@@ -81,12 +63,8 @@ void arduino_analogReadResolution(uint32_t bits) {
   if (bits == 0) bits = 10;
   gAnalogBits = bits;
 
-  // Only some cores implement analogReadResolution.
-  #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32) || defined(ARDUINO_ARCH_RP2040) || defined(ESP32)
-    analogReadResolution((int)bits);
-  #else
-    (void)bits;
-  #endif
+  // On Due this exists.
+  analogReadResolution((int)bits);
 }
 
 uint32_t arduino_analogMaxValue(void) {
@@ -94,28 +72,16 @@ uint32_t arduino_analogMaxValue(void) {
 }
 
 // ----------------------
-// Constants
-// ----------------------
-uint32_t arduino_builtin_led(void) {
-#ifdef LED_BUILTIN
-  return (uint32_t)LED_BUILTIN;
-#else
-  return 13;
-#endif
-}
-
-uint32_t arduino_mode_output(void)       { return (uint32_t)OUTPUT; }
-uint32_t arduino_mode_input(void)        { return (uint32_t)INPUT; }
-uint32_t arduino_mode_input_pullup(void) { return (uint32_t)INPUT_PULLUP; }
-uint32_t arduino_high(void)              { return (uint32_t)HIGH; }
-uint32_t arduino_low(void)               { return (uint32_t)LOW; }
-
-// ----------------------
 // IRQ
 // ----------------------
 int32_t arduino_digitalPinToInterrupt(uint32_t pin) {
+#if defined(digitalPinToInterrupt)
   int irq = digitalPinToInterrupt((uint8_t)pin);
   return (int32_t)irq;
+#else
+  (void)pin;
+  return -1;
+#endif
 }
 
 uint32_t arduino_irq_mode_low(void)     { return (uint32_t)LOW; }
@@ -125,14 +91,14 @@ uint32_t arduino_irq_mode_falling(void) { return (uint32_t)FALLING; }
 uint32_t arduino_irq_mode_high(void)    { return (uint32_t)HIGH; }
 
 int32_t arduino_irq_attach(uint32_t pin, uint32_t mode) {
-  int irq = digitalPinToInterrupt((uint8_t)pin);
+  int irq = (int)arduino_digitalPinToInterrupt(pin);
 
 #ifdef NOT_AN_INTERRUPT
   if (irq == NOT_AN_INTERRUPT) return -1;
 #endif
   if (irq < 0) return -1;
 
-  for (int i = 0; i < ARDUINO_SWIFT_IRQ_SLOTS; i++) {
+  for (int i = 0; i < (int)ARDUINO_SWIFT_IRQ_SLOTS; i++) {
     if (!gSlots[i].used) {
       gSlots[i].used = 1;
       gSlots[i].irqNumber = (uint8_t)irq;
@@ -189,30 +155,6 @@ void arduino_serial_print_u32(uint32_t v) {
 
 void arduino_serial_print_f64(double v) {
   Serial.print(v);
-}
-
-// ----------------------
-// SPI
-// ----------------------
-void arduino_spi_begin(void) { SPI.begin(); }
-void arduino_spi_end(void)   { SPI.end(); }
-
-void arduino_spi_beginTransaction(uint32_t clockHz, uint8_t bitOrder, uint8_t dataMode) {
-  SPI.beginTransaction(SPISettings((unsigned long)clockHz, (BitOrder)bitOrder, (uint8_t)dataMode));
-}
-
-void arduino_spi_endTransaction(void) {
-  SPI.endTransaction();
-}
-
-uint8_t arduino_spi_transfer(uint8_t v) {
-  return SPI.transfer(v);
-}
-
-uint32_t arduino_spi_transfer_buf(uint8_t* data, uint32_t len) {
-  if (!data || len == 0) return 0;
-  SPI.transfer(data, (size_t)len);
-  return len;
 }
 
 } // extern "C"
