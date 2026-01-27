@@ -1,37 +1,8 @@
 # ArduinoSwift
 
-**ArduinoSwift** is an experimental toolchain that lets you write **Arduino firmware in Swift** using **Embedded Swift**, while still relying on the **official Arduino cores, bootloaders, and Arduino CLI** (no forks, no patches).
+**ArduinoSwift** is an experimental toolchain that lets you write **Arduino firmware in Swift** using **Embedded Swift**, while still relying on the **official Arduino cores, bootloaders, and Arduino CLI** (no forks, no patching).
 
-This is a **research / learning project**. Expect breaking changes.
-
----
-
-## TL;DR
-
-- You write your app logic in **Swift**
-- ArduinoSwift compiles it with **Embedded Swift** into a single `.o`
-- ArduinoSwift stages required bridge code + libraries into a temporary sketch
-- `arduino-cli` builds the final firmware with the official core/toolchain
-- Upload/monitor works as usual
-
----
-
-## Repository layout
-
-```
-ArduinoSwift/
-├─ tools/
-│  └─ arduino-swift/              # the CLI tool (C) + runtimes
-│     ├─ arduino/                 # Arduino-side libraries shipped with the tool (optional per lib)
-│     ├─ swift/                   # Swift runtime + Swift libraries
-│     ├─ boards.json              # board definitions (FQBN, swift target, cpu, etc.)
-│     └─ ...
-└─ usage/
-   ├─ config.json                 # project config (board + libs)
-   ├─ libs/                       # project-local Swift libs (optional)
-   ├─ main.swift                  # your firmware entry
-   └─ ...                         # example project
-```
+This project is **research‑oriented**, **unstable**, and **not production‑ready**. The goal is exploration: understanding how far Swift can go on real microcontrollers.
 
 ---
 
@@ -39,144 +10,117 @@ ArduinoSwift/
 
 ArduinoSwift is composed of:
 
-- A **command-line tool written in C** (build orchestration and staging)
+- A **command‑line tool written in C** (build orchestration + staging)
 - A **Swift runtime layer** designed for embedded environments
 - A minimal **C/C++ bridge** that exposes Arduino APIs to Swift
-- The **official Arduino toolchain** (arduino-cli, cores, linker, uploader)
+- The **official Arduino toolchain** (`arduino-cli`, cores, linker, uploader)
 
-You write firmware logic in Swift. Arduino remains responsible for everything else.
+You write the firmware logic in Swift. Arduino remains responsible for everything else.
 
-✅ No Arduino core is forked  
-✅ No bootloader is replaced  
-✅ No vendor toolchain is modified
+**No Arduino core is forked.**  
+**No bootloader is replaced.**  
+**No vendor toolchain is modified.**
 
 ---
 
 ## What ArduinoSwift is NOT
 
 - ❌ Not a reimplementation of Arduino in Swift
-- ❌ Not a Swift-only toolchain
+- ❌ Not a Swift‑only toolchain
 - ❌ Not a simulator
-- ❌ Not production-ready
+- ❌ Not production‑ready
 
-This project intentionally stays close to real hardware.
-
----
-
-## Supported boards (currently)
-
-Board support is driven by `tools/arduino-swift/boards.json`.
-
-Example entries:
-
-```json
-{
-  "Due": {
-    "fqbn": "arduino:sam:arduino_due_x",
-    "core": "arduino:sam",
-    "swift_target": "armv7-none-none-eabi",
-    "cpu": "cortex-m3"
-  },
-  "R4Minima": {
-    "fqbn": "arduino:renesas_uno:minima",
-    "core": "arduino:renesas_uno",
-    "swift_target": "armv7em-none-none-eabi",
-    "cpu": "cortex-m4",
-    "float_abi": "hard",
-    "fpu": "fpv4-sp-d16"
-  }
-}
-```
-
-Notes:
-
-- For **R4 Minima (Cortex-M4F)**, ArduinoSwift forces the Arduino core build flags to match Swift’s object ABI (avoiding common VFP mismatch linker errors).
-- If you add new boards, keep the definition minimal and explicit: `fqbn`, `core`, `swift_target`, `cpu` (+ optional float settings if needed).
+This project intentionally stays **close to real hardware**.
 
 ---
 
-## Prerequisites
+## Current status
 
-- **arduino-cli** installed and working
-- Board platform installed via Arduino CLI (e.g. `arduino:sam`, `arduino:renesas_uno`, etc.)
-- An **Embedded Swift** toolchain / snapshot (Swift nightly) compatible with your targets
-
-> Tip: make sure `arduino-cli compile` works for the target board *before* using ArduinoSwift.
-
----
-
-## Quick start (usage example)
-
-Go to the example project:
-
-```bash
-cd usage
-```
-
-Build:
-
-```bash
-../tools/arduino-swift/bin/arduino-swift build
-```
-
-Upload:
-
-```bash
-../tools/arduino-swift/bin/arduino-swift upload
-```
-
-Serial monitor:
-
-```bash
-../tools/arduino-swift/bin/arduino-swift monitor
-```
-
-(Exact binary location may vary depending on how you build/install the tool.)
+- 🚧 Actively developed
+- 🧪 Experimental and unstable
+- 🧰 Multi‑board via `boards.json` (e.g. Due, Uno R4 Minima)
+- ⚠️ Breaking changes are expected
 
 ---
 
-## Project configuration (`usage/config.json`)
+## High‑level architecture
 
-ArduinoSwift is configuration-driven.
+1. You write application logic in **Swift**
+2. Swift is compiled with **Embedded Swift** into a single `.o` object
+3. ArduinoSwift stages required shims + bridge sources into a sketch directory
+4. `arduino-cli` builds the final firmware using the official core
+5. The resulting binary is uploaded normally
 
-Minimal example:
+Swift and Arduino are linked **at the object level**, not through hacks or core patches.
+
+---
+
+## Swift ↔ Arduino integration
+
+- Swift never runs inside ISRs (keep it explicit and predictable)
+- Hardware interaction goes through explicit C ABI bridges
+- Libraries can be:
+  - Swift‑only
+  - Arduino‑only (C/C++)
+  - Mixed Swift + Arduino C/C++ bridges
+
+The build system stages bridge sources safely and keeps compilation deterministic.
+
+---
+
+## Configuration
+
+Your project uses a `config.json` to declare:
+
+- Which **board** you’re targeting
+- Which **Swift libs** should be compiled into the Swift object
+- Which **Arduino (C/C++) libs** must be compiled by `arduino-cli`
+
+### Example `config.json`
 
 ```json
 {
   "board": "Due",
-  "libs": ["I2C", "Button"]
+  "lib": ["I2C", "Button", "SSD1306"],
+  "arduino_lib": ["SSD1306Ascii"]
 }
 ```
 
-For a project that also uses a project-local Swift lib:
+### Fields
 
-```json
-{
-  "board": "R4Minima",
-  "libs": ["I2C", "Button", "SSD1306"]
-}
-```
+#### `board`
 
-### How libraries are resolved
+A key that must exist in `boards.json` (tool/runtime), providing:
 
-When you list a lib in `config.json`, ArduinoSwift:
+- `fqbn` (Arduino Fully Qualified Board Name)
+- `swift_target`
+- `cpu`
+- optional flags (per board) to keep ABI/toolchain consistent
 
-1. Looks for the Swift library in:
-   - `tools/arduino-swift/swift/libs/<Lib>` (tool-shipped)
-   - `usage/libs/<Lib>` (project-local)
-2. Compiles all `.swift` files into the final Swift object
-3. If the lib contains C/C++ bridge files, ArduinoSwift stages them for Arduino compilation
-4. If there is a matching Arduino-side library shipped with the tool (`tools/arduino-swift/arduino/libs/<Lib>`), it is staged too
+#### `lib` (Swift libraries)
 
-Additionally, **user Arduino libs** are expected to be discovered from the user sketchbook by Arduino CLI (ArduinoSwift does not copy them to avoid double compilation).
+List of Swift libraries to include in the Swift compilation step.
+
+Resolution order (case‑insensitive):
+1. Tool/runtime Swift libs: `tools/arduino-swift/swift/libs/<Lib>`
+2. Project-local Swift libs: `<project>/libs/<Lib>`
+
+These Swift sources are appended to the `swiftc` invocation and compiled into the single `.o`.
+
+#### `arduino_lib` (Arduino C/C++ libraries)
+
+List of Arduino libraries that **must be discovered and compiled by Arduino CLI** from the user’s sketchbook / installed platforms.
+
+- These are **NOT copied** into the staged sketch (to avoid duplicate compilation).
+- They are expected to be found by Arduino’s library discovery mechanism (as if you were compiling a normal sketch).
+
+Typical use case:
+- A Swift wrapper (in `lib`) calls a small bridge `.cpp` that uses a third‑party Arduino library.
+- That third‑party library lives in your Arduino sketchbook (`~/Documents/Arduino/libraries`) or inside the installed platform package.
 
 ---
 
-## Firmware entry (Swift)
-
-Your `usage/main.swift` is appended to the Swift compile step.
-
-A typical entry looks like this:
+## Example (Swift)
 
 ```swift
 @_silgen_name("arduino_swift_main")
@@ -203,21 +147,32 @@ public func arduino_swift_main() {
 
 ---
 
-## High-level build pipeline
+## Tool usage
 
-1. Collect Swift sources:
-   - `tools/arduino-swift/swift/core/*.swift`
-   - selected Swift libs (`swift/libs` and/or `usage/libs`)
-   - `usage/main.swift`
-2. Compile with `swiftc` (Embedded Swift) into a single `.o`
-3. Stage a temporary Arduino sketch directory:
-   - copy bridge `.c/.cpp/.h` files into `sketch/libraries/<Lib>/src`
-   - promote bridge sources to sketch root (to guarantee compile/link)
-   - generate shim headers in sketch root (to satisfy `#include "X.h"`)
-4. Run `arduino-cli compile` with build properties:
-   - inject the Swift `.o` into the final link
-   - adjust flags for board/ABI compatibility when needed
-5. Upload using the normal Arduino upload toolchain
+```bash
+arduino-swift build
+arduino-swift upload
+arduino-swift monitor
+```
+
+Internally, the tool orchestrates:
+
+- `swiftc` (Embedded Swift) → produces `ArduinoSwiftApp.o`
+- `arduino-cli compile` → compiles Arduino core + Arduino libs + links Swift object
+- `arduino-cli upload` / serial monitor tooling as configured
+
+---
+
+## Project layout (typical)
+
+- `tools/arduino-swift/` — the C CLI tool + runtimes
+- `tools/arduino-swift/swift/core/` — Swift core runtime
+- `tools/arduino-swift/swift/libs/` — built-in Swift libs
+- `usage/` — example project (your firmware)
+  - `config.json`
+  - `main.swift`
+  - `libs/` (optional project-local Swift libs)
+  - build output directories created by the tool
 
 ---
 
@@ -225,25 +180,10 @@ public func arduino_swift_main() {
 
 - Real Swift on real hardware
 - No Arduino core forks
-- Deterministic and transparent builds
+- Deterministic builds (staged sketch dir)
 - Configuration over convention
 - Explicit over implicit
 - Correctness over convenience
-
----
-
-## Known quirks / tips
-
-### UNO R4 (Renesas) + I2C OLED (SSD1306, etc.)
-If you see random pixels / partially-cleared screens on power-up, it is often an I2C timing/timeout issue on the Renesas `Wire` implementation when bus conditions are “slow” (level shifters, pull-ups, etc.). A common fix is to set a larger `Wire` timeout and use 100 kHz:
-
-```cpp
-#if defined(ARDUINO_ARCH_RENESAS)
-  Wire.setWireTimeout(10000);
-  Wire.setClock(100000);
-  delay(10);
-#endif
-```
 
 ---
 
@@ -252,11 +192,11 @@ If you see random pixels / partially-cleared screens on power-up, it is often an
 ArduinoSwift exists to explore:
 
 - Embedded Swift viability
-- Swift ABI and C interop in constrained environments
+- Swift ABI and C interop on constrained environments
 - Alternative firmware architectures
-- Safer, more expressive embedded code on microcontrollers
+- Safer, more expressive embedded code
 
-It is intentionally low-level and honest about the constraints.
+It is intentionally **low‑level**, **honest**, and **unforgiving**.
 
 ---
 
@@ -266,6 +206,7 @@ This project is experimental and intended for:
 
 - Research
 - Learning
+- Exploration
 - Toolchain experimentation
 
 Use at your own risk.
@@ -274,4 +215,4 @@ Use at your own risk.
 
 ## License
 
-TBD.
+To be defined.
