@@ -138,4 +138,22 @@ int posix_memalign(void** memptr, size_t alignment, size_t size) {
   return 0;
 }
 
+// -----------------------------
+// getentropy shim (newlib/mbed may require this via arc4random.o)
+// -----------------------------
+int getentropy(void* buf, size_t len) {
+  if (!buf) return -1;
+
+  if (!g_rng_seeded) {
+    randomSeed((unsigned long)micros());
+    g_rng_seeded = true;
+  }
+
+  uint8_t* p = (uint8_t*)buf;
+  for (size_t i = 0; i < len; i++) {
+    p[i] = (uint8_t)random(0, 256);
+  }
+  return 0;
+}
+
 } // extern "C"

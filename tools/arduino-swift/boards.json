@@ -2,15 +2,31 @@
   "Due": {
     "fqbn": "arduino:sam:arduino_due_x",
     "core": "arduino:sam",
+    "api": "due_sam",
     "swift_target": "armv7-none-none-eabi",
     "cpu": "cortex-m3"
   },
   "R4Minima": {
     "fqbn": "arduino:renesas_uno:minima",
     "core": "arduino:renesas_uno",
+    "api": "uno_r4_renesas",
     "swift_target": "armv7em-none-none-eabi",
     "cpu": "cortex-m4",
     "float_abi": "hard",
     "fpu": "fpv4-sp-d16"
+  },
+  "GigaR1": {
+    "fqbn_base": "arduino:mbed_giga:giga",
+    "core": "arduino:mbed_giga",
+    "api": "giga_mbed",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m7",
+    "float_abi": "hard",
+    "fpu": "fpv5-d16",
+    "default_board_options": {
+      "target_core": "cm7",
+      "split": "100_0",
+      "security": "none"
+    }
   }
 }

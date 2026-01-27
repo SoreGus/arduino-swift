@@ -8,6 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+
+// ------------------------------------------------------------
+// Small string helpers
+// ------------------------------------------------------------
 
 static int str_ieq(const char* a, const char* b) {
     if (!a || !b) return 0;
@@ -20,6 +25,14 @@ static int str_ieq(const char* a, const char* b) {
         ++a; ++b;
     }
     return (*a == 0 && *b == 0) ? 1 : 0;
+}
+
+static int str_endswith_ieq(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
+    size_t ls = strlen(s);
+    size_t lf = strlen(suffix);
+    if (lf > ls) return 0;
+    return str_ieq(s + (ls - lf), suffix);
 }
 
 static void append_swift_list_as_args(const char* newline_list, char* out_args, size_t out_cap) {
@@ -49,6 +62,10 @@ static void append_swift_list_as_args(const char* newline_list, char* out_args, 
     free(tmp);
 }
 
+// ------------------------------------------------------------
+// Resolve tool-provided libs
+// ------------------------------------------------------------
+
 static int resolve_swift_lib_dir(const char* runtime_swift,
                                 const char* libName,
                                 char* out_dir, size_t out_dir_cap,
@@ -58,16 +75,23 @@ static int resolve_swift_lib_dir(const char* runtime_swift,
     return fs_resolve_dir_case_insensitive(libs_root, libName, out_dir, out_dir_cap, out_leaf, out_leaf_cap);
 }
 
-static int resolve_arduino_lib_dir(const char* runtime_arduino,
+/*
+  Arduino-side libs live at:
+    tools/arduino-swift/arduino/libs/<Lib>/*   (NO /src required)
+    (your tool may still stage them into sketch/libraries/<Lib>/src via normalize_arduino_lib_layout)
+*/
+static int resolve_arduino_lib_dir(const char* runtime_arduino_root,
                                   const char* libName,
                                   char* out_dir, size_t out_dir_cap,
                                   char* out_leaf, size_t out_leaf_cap) {
     char libs_root[1024];
-    if (!path_join(libs_root, sizeof(libs_root), runtime_arduino, "libs")) return 0;
+    if (!path_join(libs_root, sizeof(libs_root), runtime_arduino_root, "libs")) return 0;
     return fs_resolve_dir_case_insensitive(libs_root, libName, out_dir, out_dir_cap, out_leaf, out_leaf_cap);
 }
 
-// ---------- tiny helpers ----------
+// ------------------------------------------------------------
+// Tiny helpers
+// ------------------------------------------------------------
 
 static const char* path_basename(const char* p) {
     const char* s = p ? strrchr(p, '/') : NULL;
@@ -94,7 +118,10 @@ static void write_text_file(const char* path, const char* content) {
     fclose(f);
 }
 
+// ------------------------------------------------------------
 // List helpers (newline separated paths)
+// ------------------------------------------------------------
+
 static int list_c_cpp_files(const char* dir, char* out, size_t out_cap) {
     if (!dir || !dir[0]) return 0;
     out[0] = 0;
@@ -113,12 +140,51 @@ static int list_headers(const char* dir, char* out, size_t out_cap) {
     return 1;
 }
 
-/*
-  Key rule (no manifest, no Arduino lib detection dependency):
-  - Bridge sources (.c/.cpp) MUST be compiled & linked -> put them in sketch root.
-  - Headers included by those sources MUST be reachable -> generate shim headers in sketch root
-    that forward to libraries/<Lib>/src/<Header>.
-*/
+// ------------------------------------------------------------
+// Path derivation: ctx->runtime_arduino currently points to ".../arduino/commom"
+// but Arduino-side libs live at ".../arduino/libs". So we derive the parent.
+// ------------------------------------------------------------
+
+static int derive_arduino_runtime_root(const char* runtime_arduino,
+                                      char* out_root, size_t out_root_cap) {
+    if (!runtime_arduino || !runtime_arduino[0]) return 0;
+    if (!out_root || out_root_cap == 0) return 0;
+
+    // default: as-is
+    snprintf(out_root, out_root_cap, "%s", runtime_arduino);
+
+    // handle ".../commom" or ".../common" as last path segment
+    const char* base = path_basename(runtime_arduino);
+    if (!base || !base[0]) return 1;
+
+    char b[64];
+    size_t n = strlen(base);
+    if (n >= sizeof(b)) n = sizeof(b) - 1;
+    for (size_t i = 0; i < n; i++) b[i] = (char)tolower((unsigned char)base[i]);
+    b[n] = 0;
+
+    if (strcmp(b, "commom") != 0 && strcmp(b, "common") != 0) {
+        return 1; // already root or different folder
+    }
+
+    const char* last = strrchr(runtime_arduino, '/');
+    if (!last) return 1;
+
+    size_t root_len = (size_t)(last - runtime_arduino);
+    if (root_len == 0 || root_len >= out_root_cap) return 0;
+
+    memcpy(out_root, runtime_arduino, root_len);
+    out_root[root_len] = 0;
+    return 1;
+}
+
+// ------------------------------------------------------------
+// Key rule (no manifest, no Arduino lib detection dependency):
+// - Bridge sources (.c/.cpp) MUST be compiled & linked -> put them in sketch root.
+// - Headers included by those sources MUST be reachable -> generate shim headers in sketch root
+//   that forward to libraries/<Lib>/src/<Header>.
+// ------------------------------------------------------------
+
 static void generate_shim_headers_for_lib(const char* sketch_dir, const char* leaf) {
     char src_dir[1024];
     snprintf(src_dir, sizeof(src_dir), "%s/libraries/%s/src", sketch_dir, leaf);
@@ -212,6 +278,11 @@ static void promote_bridge_sources_to_sketch_root(const char* sketch_dir, const 
   Ensure library 1.5 layout for staged libs:
     libraries/<Name>/src/*
   This keeps things organized and also helps if the user later wants pure Arduino-lib behavior.
+
+  IMPORTANT:
+  - Your tool runtime libs are stored as arduino/libs/<Lib>/* (NO /src).
+  - This function runs only on the *staged* copy inside build/sketch/libraries/<Lib>.
+  - So you can keep your repo layout flat; staging becomes /src automatically.
 */
 static void normalize_arduino_lib_layout(const char* lib_dir) {
     if (!lib_dir || !lib_dir[0]) return;
@@ -283,10 +354,29 @@ static void debug_dump_sketch_tree(const char* sketch_dir) {
     run_cmd(cmd);
 }
 
+// ------------------------------------------------------------
+// Main
+// ------------------------------------------------------------
+
 int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
     if (!ctx) return 0;
 
     ctx->swift_args[0] = 0;
+
+    // --------------------------------------------------
+    // 0) Derive Arduino runtime root for Arduino-side libs
+    //
+    // ctx->runtime_arduino is currently ".../arduino/commom"
+    // but Arduino-side libs live in ".../arduino/libs/<Lib>/*"
+    // --------------------------------------------------
+    char arduino_runtime_root[1024];
+    if (!derive_arduino_runtime_root(ctx->runtime_arduino, arduino_runtime_root, sizeof(arduino_runtime_root))) {
+        log_warn("Failed deriving Arduino runtime root from: %s (using as-is)", ctx->runtime_arduino);
+        snprintf(arduino_runtime_root, sizeof(arduino_runtime_root), "%s", ctx->runtime_arduino);
+    } else {
+        // Optional: make it visible in logs (helps debugging)
+        log_info("Arduino runtime root: %s", arduino_runtime_root);
+    }
 
     // --------------------------------------------------
     // 1) Core Swift files
@@ -311,8 +401,8 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
 
     // --------------------------------------------------
     // 2) Swift libs + optional Arduino libs
-    //    Staging rule (professional):
-    //      - keep libs under sketch/libraries/<Lib>/src
+    //    Staging rule:
+    //      - keep libs under sketch/libraries/<Lib>/src (staged layout)
     //      - ALSO promote bridge .c/.cpp into sketch root to guarantee compile/link
     //      - generate shim headers in sketch root to satisfy #include "X.h"
     // --------------------------------------------------
@@ -357,7 +447,7 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
         log_info("Adding Swift lib: %s", leaf);
         append_swift_list_as_args(lib_list, ctx->swift_args, sizeof(ctx->swift_args));
 
-        // ---- Stage Swift C/C++ bridges into sketch/libraries/<leaf> ----
+        // ---- Stage Swift C/C++ bridges (if any) into sketch/libraries/<leaf> ----
         {
             char dst_libdir[1024];
             snprintf(dst_libdir, sizeof(dst_libdir), "%s/libraries/%s", ctx->sketch_dir, leaf);
@@ -379,18 +469,19 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
         }
 
         // ---- Stage optional Arduino-side lib shipped with tool ----
+        // Tool layout expected: tools/arduino-swift/arduino/libs/<Lib>/*
         {
             char arduino_libdir[1024];
             char arduino_leaf[64] = {0};
 
-            if (resolve_arduino_lib_dir(ctx->runtime_arduino, libname, arduino_libdir, sizeof(arduino_libdir), arduino_leaf, sizeof(arduino_leaf))) {
+            if (resolve_arduino_lib_dir(arduino_runtime_root, libname, arduino_libdir, sizeof(arduino_libdir), arduino_leaf, sizeof(arduino_leaf))) {
                 const char* aleaf = (arduino_leaf[0] ? arduino_leaf : libname);
 
                 char dst_libdir[1024];
                 snprintf(dst_libdir, sizeof(dst_libdir), "%s/libraries/%s", ctx->sketch_dir, aleaf);
                 mkdir_p(dst_libdir);
 
-                log_info("Copying Arduino lib: %s", aleaf);
+                log_info("Copying Arduino lib: %s (%s)", aleaf, arduino_libdir);
                 if (!fs_copy_dir_recursive(arduino_libdir, dst_libdir)) {
                     log_error("Failed to copy Arduino lib dir: %s", arduino_libdir);
                     return 0;

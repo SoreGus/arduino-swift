@@ -9,7 +9,6 @@
 // - Returns 1 on success, 0 on failure.
 //
 #pragma once
-
 #include "common/build_context.h"
 
 #ifdef __cplusplus

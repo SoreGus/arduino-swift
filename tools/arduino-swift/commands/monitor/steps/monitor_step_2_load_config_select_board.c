@@ -1,15 +1,3 @@
-// monitor_step_2_load_config_select_board.c
-//
-// Step 2 (monitor): Load config.json + boards.json and resolve the selected board.
-//
-// Responsibilities:
-// - Load JSON into ctx->cfg_json / ctx->boards_json
-// - Resolve board (config.json "board") into ctx->fqbn (and related fields)
-//
-// Notes:
-// - Boards are resolved from tool-internal boards.json (tool root), not the project directory.
-//
-
 #include "monitor/steps/monitor_step_2_load_config_select_board.h"
 
 #include "common/build_context.h"
@@ -32,10 +20,10 @@ int monitor_step_2_load_config_select_board(BuildContext* ctx) {
         return 0;
     }
 
-    if (ctx->board[0]) {
-        log_info("board = %s", ctx->board);
-    }
-    log_info("fqbn  = %s", ctx->fqbn);
+    log_info("board      : %s", ctx->board);
+    log_info("fqbn_base  : %s", ctx->fqbn_base);
+    log_info("fqbn_final : %s", ctx->fqbn_final);
+    if (ctx->board_opts_csv[0]) log_info("board_opts : %s", ctx->board_opts_csv);
 
     return 1;
 }

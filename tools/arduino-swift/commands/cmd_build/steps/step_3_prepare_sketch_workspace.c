@@ -9,6 +9,31 @@
 #include <stdio.h>
 #include <string.h>
 
+static int ends_with(const char* s, const char* suf) {
+    if (!s || !suf) return 0;
+    size_t n = strlen(s);
+    size_t m = strlen(suf);
+    if (m > n) return 0;
+    return memcmp(s + (n - m), suf, m) == 0;
+}
+
+static void normalize_common_dir(const char* runtime_arduino, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+
+    if (!runtime_arduino || !runtime_arduino[0]) return;
+
+    // build_context.c geralmente define runtime_arduino como ".../arduino/commom"
+    // mas versões antigas podem definir como ".../arduino".
+    // Aqui garantimos "common_dir" apontando para a pasta que realmente contém sketch.ino.
+    if (ends_with(runtime_arduino, "/commom")) {
+        strncpy(out, runtime_arduino, cap - 1);
+        out[cap - 1] = 0;
+    } else {
+        snprintf(out, cap, "%s/commom", runtime_arduino);
+    }
+}
+
 static int require_and_copy(const char* src_dir, const char* name, const char* dst_dir) {
     char src[1024], dst[1024];
     snprintf(src, sizeof(src), "%s/%s", src_dir, name);
@@ -75,8 +100,22 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
     log_info("Preparing Arduino sketch workspace at: %s", ctx->sketch_dir);
 
     // New runtime layout: arduino/commom/
+    // But build_context may already include /commom. Don't append twice.
     char common_dir[1024];
-    snprintf(common_dir, sizeof(common_dir), "%s/commom", ctx->runtime_arduino);
+    normalize_common_dir(ctx->runtime_arduino, common_dir, sizeof(common_dir));
+
+    // Extra fallback: se por algum motivo common_dir não existe mas runtime_arduino existe,
+    // tentamos usar runtime_arduino direto (layout legado onde os arquivos estão em arduino/)
+    if (!dir_exists(common_dir) && dir_exists(ctx->runtime_arduino)) {
+        // Só troca se runtime_arduino tiver sketch.ino diretamente
+        char probe[1024];
+        snprintf(probe, sizeof(probe), "%s/sketch.ino", ctx->runtime_arduino);
+        if (file_exists(probe)) {
+            strncpy(common_dir, ctx->runtime_arduino, sizeof(common_dir) - 1);
+            common_dir[sizeof(common_dir) - 1] = 0;
+        }
+    }
+
     log_info("Runtime Arduino (common): %s", common_dir);
 
     if (!require_and_copy(common_dir, "sketch.ino", ctx->sketch_dir)) return 0;
@@ -89,7 +128,8 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
             "ArduinoSwiftShim.hpp",
             "ArduinoSwiftShimBase.hpp",
         };
-        if (!copy_first_existing_as(common_dir, cand, (int)(sizeof(cand)/sizeof(cand[0])), ctx->sketch_dir, "ArduinoSwiftShim.h")) return 0;
+        if (!copy_first_existing_as(common_dir, cand, (int)(sizeof(cand)/sizeof(cand[0])),
+                                    ctx->sketch_dir, "ArduinoSwiftShim.h")) return 0;
     }
 
     // Runtime may provide ArduinoSwiftShimBase.cpp; the sketch expects ArduinoSwiftShim.cpp.
@@ -99,7 +139,8 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
             "ArduinoSwiftShim.cpp",
             "ArduinoSwiftShimBase.cpp",
         };
-        if (!copy_first_existing_as(common_dir, cand, (int)(sizeof(cand)/sizeof(cand[0])), ctx->sketch_dir, "ArduinoSwiftShim.cpp")) return 0;
+        if (!copy_first_existing_as(common_dir, cand, (int)(sizeof(cand)/sizeof(cand[0])),
+                                    ctx->sketch_dir, "ArduinoSwiftShim.cpp")) return 0;
     }
 
     if (!require_and_copy(common_dir, "Bridge.cpp", ctx->sketch_dir)) return 0;
@@ -107,11 +148,10 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
     // Runtime support may be provided as .c or .cpp (and may be suffixed with Base).
     // Prefer the .c variant when present.
     //
-    // New layout note:
-    // Some repos may not keep SwiftRuntimeSupport.* under arduino/commom yet.
-    // We try a few likely locations (common_dir, legacy runtime_arduino, and a couple
-    // of runtime_swift folders). If still missing, we warn and continue; link errors
-    // later will clearly indicate what is missing.
+    // We try a few likely locations:
+    //   1) common_dir (arduino/commom)
+    //   2) runtime_arduino root (legacy layouts)
+    //   3) runtime_swift root / common / support
     {
         const char* const cand_c[] = {
             "SwiftRuntimeSupport.c",
@@ -125,18 +165,17 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
             "SwiftRuntimeSupportBase.cxx",
         };
 
-        // Try multiple source folders (best-effort)
         const char* src_dirs[8];
         int src_dir_count = 0;
 
-        // 1) New common dir (arduino/commom)
-        src_dirs[src_dir_count++] = common_dir;
+        // 1) Normal common dir
+        if (common_dir[0] && dir_exists(common_dir)) src_dirs[src_dir_count++] = common_dir;
 
-        // 2) Legacy runtime_arduino root (older layout)
-        src_dirs[src_dir_count++] = ctx->runtime_arduino;
+        // 2) runtime_arduino root (older layout)
+        if (ctx->runtime_arduino[0] && dir_exists(ctx->runtime_arduino)) src_dirs[src_dir_count++] = ctx->runtime_arduino;
 
-        // 3) runtime_swift root (some layouts keep C support next to Swift runtime)
-        src_dirs[src_dir_count++] = ctx->runtime_swift;
+        // 3) runtime_swift root
+        if (ctx->runtime_swift[0] && dir_exists(ctx->runtime_swift)) src_dirs[src_dir_count++] = ctx->runtime_swift;
 
         // 4) runtime_swift/common
         char swift_common_dir[1024];
@@ -150,12 +189,13 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
 
         int copied = 0;
 
-        // Prefer C
+        // Prefer C output
         for (int di = 0; di < src_dir_count && !copied; di++) {
             const char* sd = src_dirs[di];
             if (!sd || !sd[0] || !dir_exists(sd)) continue;
 
-            if (copy_first_existing_as(sd, cand_c, (int)(sizeof(cand_c)/sizeof(cand_c[0])), ctx->sketch_dir, "SwiftRuntimeSupport.c")) {
+            if (copy_first_existing_as(sd, cand_c, (int)(sizeof(cand_c)/sizeof(cand_c[0])),
+                                       ctx->sketch_dir, "SwiftRuntimeSupport.c")) {
                 copied = 1;
                 break;
             }
@@ -166,7 +206,8 @@ int cmd_build_step_3_prepare_sketch_workspace(BuildContext* ctx) {
             const char* sd = src_dirs[di];
             if (!sd || !sd[0] || !dir_exists(sd)) continue;
 
-            if (copy_first_existing_as(sd, cand_cpp, (int)(sizeof(cand_cpp)/sizeof(cand_cpp[0])), ctx->sketch_dir, "SwiftRuntimeSupport.cpp")) {
+            if (copy_first_existing_as(sd, cand_cpp, (int)(sizeof(cand_cpp)/sizeof(cand_cpp[0])),
+                                       ctx->sketch_dir, "SwiftRuntimeSupport.cpp")) {
                 copied = 1;
                 break;
             }

@@ -1,5 +1,10 @@
 {
-  "board": "Due",
+  "board": "GigaR1",
+  "board_options": {
+    "target_core": "cm7",
+    "split": "100_0",
+    "security": "none"
+  },
   "lib": ["I2C", "Button", "SSD1306"],
   "arduino_lib": ["SSD1306Ascii"]
 }

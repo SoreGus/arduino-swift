@@ -1,0 +1,5 @@
+{
+  "board": "Due",
+  "lib": ["I2C", "Button", "SSD1306"],
+  "arduino_lib": ["SSD1306Ascii"]
+}
