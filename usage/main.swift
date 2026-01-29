@@ -10,8 +10,8 @@
 @_silgen_name("arduino_swift_main")
 public func arduino_swift_main() {
 
-    let ssid = "Sore"
-    let pass = "atendimento12"
+    let ssid = "xxx"
+    let pass = "xxx"
 
     print("swift boot\n")
     print("wifi: sta begin\n")
