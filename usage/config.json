@@ -5,6 +5,6 @@
     "split": "100_0",
     "security": "none"
   },
-  "lib": ["I2C", "Button", "SSD1306"],
-  "arduino_lib": ["SSD1306Ascii"]
+  "lib": ["wifi"],
+  "arduino_lib": []
 }

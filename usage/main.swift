@@ -1,71 +1,60 @@
 // main.swift
-// SSD1306 minimal test using ArduinoSwift runtime
-// SAFE: no Foundation, no heap, no String interpolation
+// ArduinoSwift – GIGA R1 WiFi STA monitor (raw ip version)
+//
+// - connect to WiFi
+// - print ssid + ip (raw) + rssi every 3000ms
+// - no time math
+// - no early return (use if/else)
+// - keepAlive already loops internally
 
 @_silgen_name("arduino_swift_main")
 public func arduino_swift_main() {
-    print("Swift boot\n")
 
-    SSD1306.begin()
+    let ssid = "Sore"
+    let pass = "atendimento12"
 
-    SSD1306.setCursor(col: 0, row: 0)
-    SSD1306.print("Arduino Swift")
+    print("swift boot\n")
+    print("wifi: sta begin\n")
 
-    SSD1306.setCursor(col: 0, row: 2)
-    SSD1306.print("SSD1306 OK")
-
-    SSD1306.setCursor(col: 0, row: 4)
-    SSD1306.print("Swift + Arduino")
-
-    var counter: UInt32 = 0
-
-    // buffer fixo C (sem heap)
-    var buf: [UInt8] = Array(repeating: 0, count: 16)
+    _ = wifi.staBegin(ssid: ssid, pass: pass)
 
     ArduinoRuntime.keepAlive {
-        SSD1306.setCursor(col: 0, row: 6)
 
-        // "Count: "
-        buf[0] = 67  // C
-        buf[1] = 111 // o
-        buf[2] = 117 // u
-        buf[3] = 110 // n
-        buf[4] = 116 // t
-        buf[5] = 58  // :
-        buf[6] = 32  // space
+        let st = wifi.getStatus()
 
-        // decimal UInt32 -> ASCII
-        var v = counter
-        var i: UInt8 = 0
-        repeat {
-            buf[Int(7 + i)] = UInt8(48 + (v % 10))
-            v /= 10
-            i &+= 1
-        } while v > 0
+        if st.isConnected {
 
-        // reverse digits
-        var a = 7
-        var b = Int(7 + i - 1)
-        while a < b {
-            let t = buf[a]
-            buf[a] = buf[b]
-            buf[b] = t
-            a &+= 1
-            b &-= 1
+            print("wifi: connected\n")
+
+            // ssid (String) still optional: OK to test; if you suspect String, comment this line.
+            let name = wifi.ssid() ?? "-"
+
+            // raw ip (no String allocation inside wifi)
+            let ip = wifi.localIpString()
+
+            let rssi = wifi.rssi()
+
+            print("ssid: ")
+            println(name)
+
+            print("ip: ")
+            println(ip)
+
+            print("rssi: ")
+            print(rssi)
+            print(" dBm\n\n")
+
+            delay(3000)
+
+        } else {
+
+            print("wifi: status=")
+            print(st.name)
+            print(" (")
+            print(st.rawValue)
+            print(")\n")
+
+            delay(1000)
         }
-
-        buf[Int(7 + i)] = 0 // null-terminated
-
-        buf.withUnsafeBufferPointer {
-            SSD1306.printCStr(
-                $0.baseAddress!.withMemoryRebound(
-                    to: CChar.self,
-                    capacity: buf.count
-                ) { $0 }
-            )
-        }
-
-        counter &+= 1
-        delay(500)
     }
 }

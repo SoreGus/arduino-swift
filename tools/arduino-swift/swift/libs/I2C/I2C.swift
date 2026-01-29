@@ -660,3 +660,9 @@ public enum I2C {
         }
     }
 }
+
+/// Build an I2C.Packet from ASCII bytes using Packet's unlabeled initializer.
+@inline(__always)
+public func asciiPacket(_ s: StaticString) -> I2C.Packet {
+    I2C.Packet(asciiBytes(s))
+}
