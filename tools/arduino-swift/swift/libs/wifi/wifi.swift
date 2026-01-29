@@ -1,231 +1,300 @@
-// wifi.swift
-// High-level Swift WiFi wrapper for ArduinoSwift ABI (GIGA R1 WiFi)
+// ============================================================
+// File: swift/libs/wifi/wifi.swift
+// ArduinoSwift - WiFi lib (STA + AP)
 //
-// Design goals:
-// - Defensive: never force-unwrap, never assume UTF-8 validity.
-// - Predictable: fixed small buffers; minimal temporary allocations.
-// - Ergonomic: Optional String for values that may be unavailable.
+// Tick-driven WiFi STA and WiFi AP helpers.
+// - WiFiSTA connects with timeout + reports.
+// - WiFiAP starts SoftAP with timeout + reports.
 //
-// Notes:
-// - The C ABI writers return number of bytes written (excluding the null terminator).
-// - If n == 0, treat as "not available".
+// IMPORTANT (embedded Swift):
+// - Avoid nested String.withCString in firmware.
+// - Keep NUL-terminated C buffers alive as stored properties.
+// - This prevents optimizer/lifetime issues that can hardfault.
+//
+// Uses ArduinoTime.millis() and the C ABI from arduino/libs/wifi.
+// ============================================================
 
-public enum wifi {
+fileprivate func _asw_makeCString(_ s: String) -> [CChar] {
+    // NUL-terminated UTF-8 (ASCII compatible for SSID/pass)
+    var out = s.utf8.map { CChar(bitPattern: $0) }
+    out.append(0)
+    return out
+}
 
-    // ------------------------------------------------------------
-    // MARK: - Status
-    // ------------------------------------------------------------
+public struct WiFiInfo: Sendable {
+    public let ssid: String
+    public let ip: String
+    public let rssi: I32
+}
 
-    public struct status: RawRepresentable, Equatable, Sendable {
-        public let rawValue: Int32
-        public init(rawValue: Int32) { self.rawValue = rawValue }
+public final class WiFiSTA: ArduinoTickable {
 
-        public static let idle           = status(rawValue: 0)
-        public static let noSsidAvail    = status(rawValue: 1)
-        public static let scanCompleted  = status(rawValue: 2)
-        public static let connected      = status(rawValue: 3)
-        public static let connectFailed  = status(rawValue: 4)
-        public static let connectionLost = status(rawValue: 5)
-        public static let disconnected   = status(rawValue: 6)
+    public typealias OnConnect = (WiFiInfo) -> Void
+    public typealias OnDisconnect = (U32) -> Void
+    public typealias OnReport = (WiFiInfo) -> Void
 
-        public var isConnected: Bool { rawValue == Self.connected.rawValue }
+    private enum State {
+        case idle
+        case connecting(deadline: U32)
+        case connected
+        case failed(deadline: U32)
+    }
 
-        public var name: StaticString {
-            switch rawValue {
-            case 0: return "idle"
-            case 1: return "noSsidAvail"
-            case 2: return "scanCompleted"
-            case 3: return "connected"
-            case 4: return "connectFailed"
-            case 5: return "connectionLost"
-            case 6: return "disconnected"
-            default: return "unknown"
+    private var state: State = .idle
+
+    private var ssid: String = ""
+    private var pass: String = ""
+
+    // Persisted NUL-terminated buffers (stable pointers for C)
+    private var ssidC: [CChar] = [0]
+    private var passC: [CChar] = [0]
+
+    private var onConnectBlock: OnConnect?
+    private var onDisconnectBlock: OnDisconnect?
+    private var onReportBlock: OnReport?
+
+    private var reportEveryMs: U32 = 0
+    private var nextReportAt: U32 = 0
+
+    public init(ssid: String, pass: String) {
+        self.ssid = ssid
+        self.pass = pass
+        self.ssidC = _asw_makeCString(ssid)
+        self.passC = _asw_makeCString(pass)
+    }
+
+    @discardableResult
+    public func onConnect(_ cb: @escaping OnConnect) -> Self {
+        self.onConnectBlock = cb
+        return self
+    }
+
+    @discardableResult
+    public func onDisconnect(_ cb: @escaping OnDisconnect) -> Self {
+        self.onDisconnectBlock = cb
+        return self
+    }
+
+    @discardableResult
+    public func onReport(everyMs: U32, _ cb: @escaping OnReport) -> Self {
+        self.reportEveryMs = everyMs
+        self.onReportBlock = cb
+        return self
+    }
+
+    public func begin(timeoutMs: U32 = 15_000) {
+        print("Checkpoint 7\n")
+
+        // Use stable pointers (no nested withCString)
+        ssidC.withUnsafeBufferPointer { ssidBuf in
+            passC.withUnsafeBufferPointer { passBuf in
+                guard let s = ssidBuf.baseAddress, let p = passBuf.baseAddress else { return }
+                let _ = _wifi_sta_begin(s, p) // ignore return by design
             }
         }
+
+        let now = ArduinoTime.millis()
+        self.state = .connecting(deadline: now &+ timeoutMs)
+
+        print("Checkpoint 8\n")
     }
 
-    public struct ip4: Sendable {
-        public let a: U8
-        public let b: U8
-        public let c: U8
-        public let d: U8
+    public func disconnect() {
+        _wifi_sta_disconnect()
+        state = .idle
     }
 
-    // ------------------------------------------------------------
-    // MARK: - C-string helpers (defensive)
-    // ------------------------------------------------------------
+    public func tick() {
+        switch state {
 
-    /// Create a temporary null-terminated UTF-8 buffer for C APIs.
-    /// This does allocate, but it's bounded by string length + 1.
-    @inline(__always)
-    private static func withCStringBytes<R>(_ s: String, _ body: (UnsafePointer<UInt8>) -> R) -> R {
-        var utf8 = Array(s.utf8)
-        utf8.append(0)
-        return utf8.withUnsafeBufferPointer { buf in
-            // baseAddress is non-nil because we appended one element
-            body(buf.baseAddress!)
-        }
-    }
-
-    @inline(__always)
-    private static func readCString(
-        cap: Int = 64,
-        _ writer: (UnsafeMutablePointer<UInt8>, UInt32) -> UInt32
-    ) -> String? {
-        if cap <= 1 { return nil }
-
-        var buf = [UInt8](repeating: 0, count: cap)
-        let n: UInt32 = buf.withUnsafeMutableBufferPointer { p in
-            writer(p.baseAddress!, UInt32(p.count))
-        }
-
-        if n == 0 { return nil }
-        if n >= UInt32(cap) { return nil }
-
-        let slice = buf.prefix(Int(n))
-
-        // lossy decode: never nil, avoids crash
-        return String(decoding: slice, as: UTF8.self)
-    }
-
-    // ------------------------------------------------------------
-    // MARK: - Basic queries
-    // ------------------------------------------------------------
-
-    public static func getStatus() -> status {
-        status(rawValue: arduino_wifi_status())
-    }
-
-    public static func ssid() -> String? {
-        readCString { out, outLen in
-            arduino_wifi_ssid(out, outLen)
-        }
-    }
-
-    public static func rssi() -> Int32 {
-        arduino_wifi_rssi()
-    }
-
-    public static func localIp() -> String? {
-        readCString(cap: 32) { out, outLen in
-            arduino_wifi_local_ip(out, outLen)
-        }
-    }
-
-    public static func apIp() -> String? {
-        readCString(cap: 32) { out, outLen in
-            arduino_wifi_ap_ip(out, outLen)
-        }
-    }
-
-    // Convenience "safe default" variants (no optional at call site)
-    public static func ssidOrEmpty() -> String { ssid() ?? "" }
-    public static func localIpOrZero() -> String { localIp() ?? "0.0.0.0" }
-
-    // ------------------------------------------------------------
-    // MARK: - STA (connect)
-    // ------------------------------------------------------------
-
-    @discardableResult
-    public static func staBegin(ssid: String, pass: String) -> status {
-        // Guard against empty ssid (avoid passing empty pointers to core)
-        if ssid.isEmpty { return status(rawValue: -1) }
-
-        let st: Int32 = withCStringBytes(ssid) { ssidPtr in
-            withCStringBytes(pass) { passPtr in
-                arduino_wifi_sta_begin(ssidPtr, passPtr)
+        case .idle:
+            if !ssid.isEmpty {
+                begin()
             }
-        }
-        return status(rawValue: st)
-    }
 
-    @discardableResult
-    public static func staBeginOpen(ssid: String) -> status {
-        if ssid.isEmpty { return status(rawValue: -1) }
-        let st: Int32 = withCStringBytes(ssid) { ssidPtr in
-            arduino_wifi_sta_begin_open(ssidPtr)
-        }
-        return status(rawValue: st)
-    }
+        case .connecting(let deadline):
+            let st = _wifi_sta_status()
+            if st == WiFiStatus.connected {
+                state = .connected
+                let info = readInfo()
+                nextReportAt = ArduinoTime.millis() &+ reportEveryMs
+                onConnectBlock?(info)
+                return
+            }
 
-    public static func disconnect() { arduino_wifi_disconnect() }
-    public static func end() { arduino_wifi_end() }
+            let now = ArduinoTime.millis()
+            if isPastDeadline(now: now, deadline: deadline) {
+                _wifi_sta_disconnect()
+                state = .failed(deadline: now &+ 3_000)
+                onDisconnectBlock?(U32(st))
+            }
 
-    // ------------------------------------------------------------
-    // MARK: - AP (access point)
-    // ------------------------------------------------------------
+        case .connected:
+            let st = _wifi_sta_status()
+            if st != WiFiStatus.connected {
+                state = .idle
+                onDisconnectBlock?(U32(st))
+                return
+            }
 
-    @discardableResult
-    public static func apBegin(ssid: String, pass: String? = nil) -> status {
-        if ssid.isEmpty { return status(rawValue: -1) }
-
-        let st: Int32 = withCStringBytes(ssid) { ssidPtr in
-            if let pass, !pass.isEmpty {
-                return withCStringBytes(pass) { passPtr in
-                    arduino_wifi_ap_begin(ssidPtr, passPtr)
+            if reportEveryMs > 0 && onReportBlock != nil {
+                let now = ArduinoTime.millis()
+                if isPastDeadline(now: now, deadline: nextReportAt) {
+                    nextReportAt = now &+ reportEveryMs
+                    onReportBlock?(readInfo())
                 }
-            } else {
-                return arduino_wifi_ap_begin(ssidPtr, nil)
+            }
+
+        case .failed(let deadline):
+            let now = ArduinoTime.millis()
+            if isPastDeadline(now: now, deadline: deadline) {
+                state = .idle
             }
         }
-        return status(rawValue: st)
     }
 
-    public static func apEnd() { arduino_wifi_ap_end() }
-
-    // ------------------------------------------------------------
-    // MARK: - Scan
-    // ------------------------------------------------------------
-
-    public struct scanResult: Sendable {
-        public let ssid: String
-        public let rssi: Int32
-        public let encryption: Int32
-    }
-
-    public static func scan() -> [scanResult] {
-        let n = Int(arduino_wifi_scan_begin())
-        if n <= 0 { return [] }
-
-        var results: [scanResult] = []
-        results.reserveCapacity(n)
-
-        for i in 0..<n {
-            let idx = Int32(i)
-
-            // Defensive: if SSID decode fails, use empty string (still keep result)
-            let name = readCString { out, outLen in
-                arduino_wifi_scan_ssid(idx, out, outLen)
-            } ?? ""
-
-            let r = arduino_wifi_scan_rssi(idx)
-            let e = arduino_wifi_scan_encryption(idx)
-
-            results.append(scanResult(ssid: name, rssi: r, encryption: e))
-        }
-
-        arduino_wifi_scan_end()
-        return results
+    private func readInfo() -> WiFiInfo {
+        let ss = String(cString: _wifi_sta_ssid())
+        var ipBuf: [CChar] = Array(repeating: 0, count: 16)
+        _wifi_sta_local_ip(&ipBuf, 16)
+        let ip = String(cString: ipBuf)
+        let rssi = I32(_wifi_sta_rssi())
+        return WiFiInfo(ssid: ss, ip: ip, rssi: rssi)
     }
 
     @inline(__always)
-    public static func localIpRaw() -> ip4? {
-        var out: [U8] = [0, 0, 0, 0] // fixed 4 bytes
-        let n: U32 = out.withUnsafeMutableBufferPointer { p in
-            arduino_wifi_local_ip_raw(p.baseAddress!)
-        }
-        if n != 4 { return nil }
-        return ip4(a: out[0], b: out[1], c: out[2], d: out[3])
-    }
-
-    // Converts raw IP bytes to a Swift String in a controlled way.
-    // This avoids C string writers and UTF-8 decoding pitfalls.
-    @inline(__always)
-    public static func localIpString() -> String {
-        let ip = localIpRaw()
-        if ip == nil { return "0.0.0.0" }
-        let v = ip!
-        // Small, deterministic formatting.
-        return "\(v.a).\(v.b).\(v.c).\(v.d)"
+    private func isPastDeadline(now: U32, deadline: U32) -> Bool {
+        return (now &- deadline) < 0x8000_0000
     }
 }
+
+public final class WiFiAP: ArduinoTickable {
+
+    public typealias OnStart = (WiFiInfo) -> Void
+    public typealias OnStop = (U32) -> Void
+
+    private enum State {
+        case idle
+        case starting(deadline: U32)
+        case started
+    }
+
+    private var state: State = .idle
+
+    private var ssid: String = ""
+    private var pass: String = ""
+
+    // Persisted NUL-terminated buffers (stable pointers for C)
+    private var ssidC: [CChar] = [0]
+    private var passC: [CChar] = [0]
+
+    private var onStartBlock: OnStart?
+    private var onStopBlock: OnStop?
+
+    public init(ssid: String, pass: String) {
+        self.ssid = ssid
+        self.pass = pass
+        self.ssidC = _asw_makeCString(ssid)
+        self.passC = _asw_makeCString(pass)
+    }
+
+    @discardableResult
+    public func onStart(_ cb: @escaping OnStart) -> Self {
+        self.onStartBlock = cb
+        return self
+    }
+
+    @discardableResult
+    public func onStop(_ cb: @escaping OnStop) -> Self {
+        self.onStopBlock = cb
+        return self
+    }
+
+    public func begin(timeoutMs: U32 = 10_000) {
+        print("Checkpoint 9\n")
+
+        ssidC.withUnsafeBufferPointer { ssidBuf in
+            passC.withUnsafeBufferPointer { passBuf in
+                guard let s = ssidBuf.baseAddress, let p = passBuf.baseAddress else { return }
+                let _ = _wifi_ap_begin(s, p) // ignore return by design
+            }
+        }
+
+        let now = ArduinoTime.millis()
+        state = .starting(deadline: now &+ timeoutMs)
+
+        print("Checkpoint 10\n")
+    }
+
+    public func stop() {
+        _wifi_ap_stop()
+        state = .idle
+    }
+
+    public func tick() {
+        switch state {
+
+        case .idle:
+            break
+
+        case .starting(let deadline):
+            let st = _wifi_ap_status()
+            if st == WiFiStatus.connected || st == WiFiStatus.apListening {
+                state = .started
+                onStartBlock?(readInfo())
+                return
+            }
+
+            let now = ArduinoTime.millis()
+            if isPastDeadline(now: now, deadline: deadline) {
+                _wifi_ap_stop()
+                state = .idle
+                onStopBlock?(U32(st))
+            }
+
+        case .started:
+            let st = _wifi_ap_status()
+            if st != WiFiStatus.connected && st != WiFiStatus.apListening {
+                state = .idle
+                onStopBlock?(U32(st))
+            }
+        }
+    }
+
+    private func readInfo() -> WiFiInfo {
+        let ss = String(cString: _wifi_sta_ssid())
+        var ipBuf: [CChar] = Array(repeating: 0, count: 16)
+        _wifi_sta_local_ip(&ipBuf, 16)
+        let ip = String(cString: ipBuf)
+        let rssi = I32(_wifi_sta_rssi())
+        return WiFiInfo(ssid: ss, ip: ip, rssi: rssi)
+    }
+
+    @inline(__always)
+    private func isPastDeadline(now: U32, deadline: U32) -> Bool {
+        return (now &- deadline) < 0x8000_0000
+    }
+}
+
+public enum WiFiStatus {
+    public static let idle: I32 = 0
+    public static let noSSID: I32 = 1
+    public static let scanCompleted: I32 = 2
+    public static let connected: I32 = 3
+    public static let connectFailed: I32 = 4
+    public static let connectionLost: I32 = 5
+    public static let disconnected: I32 = 6
+    public static let apListening: I32 = 20
+}
+
+// C ABI
+@_silgen_name("_wifi_sta_begin") private func _wifi_sta_begin(_ ssid: UnsafePointer<CChar>, _ pass: UnsafePointer<CChar>) -> I32
+@_silgen_name("_wifi_sta_disconnect") private func _wifi_sta_disconnect()
+@_silgen_name("_wifi_sta_status") private func _wifi_sta_status() -> I32
+@_silgen_name("_wifi_sta_ssid") private func _wifi_sta_ssid() -> UnsafePointer<CChar>
+@_silgen_name("_wifi_sta_local_ip") private func _wifi_sta_local_ip(_ out: UnsafeMutablePointer<CChar>, _ outLen: I32)
+@_silgen_name("_wifi_sta_rssi") private func _wifi_sta_rssi() -> I32
+
+@_silgen_name("_wifi_ap_begin") private func _wifi_ap_begin(_ ssid: UnsafePointer<CChar>, _ pass: UnsafePointer<CChar>) -> I32
+@_silgen_name("_wifi_ap_stop") private func _wifi_ap_stop()
+@_silgen_name("_wifi_ap_status") private func _wifi_ap_status() -> I32

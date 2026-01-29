@@ -13,6 +13,7 @@ public enum ArduinoRuntime {
 
     @inline(__always)
     public static func add(_ item: ArduinoTickable) {
+        print("Checkpoint 6\n")
         items.append(item)
     }
 

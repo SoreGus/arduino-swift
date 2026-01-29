@@ -5,6 +5,6 @@
     "split": "100_0",
     "security": "none"
   },
-  "lib": ["wifi"],
+  "lib": ["wifi","socket","http"],
   "arduino_lib": []
 }
