@@ -15,6 +15,15 @@
     "float_abi": "hard",
     "fpu": "fpv4-sp-d16"
   },
+  "R4WIFI": {
+    "fqbn": "arduino:renesas_uno:unor4wifi",
+    "core": "arduino:renesas_uno",
+    "api": "uno_r4_renesas",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m4",
+    "float_abi": "hard",
+    "fpu": "fpv4-sp-d16"
+  },
   "GigaR1": {
     "fqbn_base": "arduino:mbed_giga:giga",
     "core": "arduino:mbed_giga",

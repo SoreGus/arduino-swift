@@ -1,28 +1,23 @@
 // main.swift
+// Minimal example:
+// Button on pin 5 toggles the builtin LED
 
 @_silgen_name("arduino_swift_main")
 public func arduino_swift_main() {
-    print("swift boot\n")
+    print("Swift main boot\n")
 
-    let w = WiFiSTA(ssid: "Sore", pass: "atendimento12")
-        .onConnect { info in
-            print("wifi: connected\n")
-            print("ssid: "); println(info.ssid)
-            print("ip: "); println(info.ip)
-            print("rssi: "); println(info.rssi); print(" dBm\n")
-        }
-        .onDisconnect { raw in
-            print("wifi: disconnected status=")
-            println(raw)
-        }
-        .onReport(everyMs: 3000) { info in
-            println("onReportn")
-            print("rssi: "); println(info.rssi); print(" dBm\n")
-        }
+    let led = PIN.builtin
+    led.output()
+    led.off()
 
-    // Both are valid:
-    // w.addToRuntime()
-    ArduinoRuntime.add(w)
+    let button = Button(
+        pinNumber: 5,
+        onPress: {
+            led.toggle()
+            print("Button pressed -> LED toggled\n")
+        }
+    )
 
+    ArduinoRuntime.add(button)
     ArduinoRuntime.keepAlive()
 }
