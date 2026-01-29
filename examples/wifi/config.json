@@ -1,0 +1,10 @@
+{
+  "board": "GigaR1",
+  "board_options": {
+    "target_core": "cm7",
+    "split": "100_0",
+    "security": "none"
+  },
+  "lib": ["wifi"],
+  "arduino_lib": []
+}

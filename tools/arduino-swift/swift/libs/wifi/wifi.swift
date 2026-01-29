@@ -67,11 +67,6 @@ public enum wifi {
         }
     }
 
-    /// Read bytes from a C ABI "writer" into a fixed buffer and decode as UTF-8.
-    /// - Returns nil if:
-    ///   - writer writes 0 bytes
-    ///   - writer returns a length that doesn't fit the buffer
-    ///   - bytes are not valid UTF-8
     @inline(__always)
     private static func readCString(
         cap: Int = 64,
@@ -85,16 +80,12 @@ public enum wifi {
         }
 
         if n == 0 { return nil }
-
-        // Defensive: if writer lies, clamp safely.
-        // Our C side is documented as "excluding null", so max valid is cap-1.
         if n >= UInt32(cap) { return nil }
 
-        // slice exactly n bytes (excluding null terminator)
         let slice = buf.prefix(Int(n))
 
-        // Validate UTF-8 safely
-        return String(validating: slice, as: UTF8.self)
+        // lossy decode: never nil, avoids crash
+        return String(decoding: slice, as: UTF8.self)
     }
 
     // ------------------------------------------------------------
