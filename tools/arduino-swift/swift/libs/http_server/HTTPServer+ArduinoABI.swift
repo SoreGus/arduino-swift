@@ -1,5 +1,4 @@
 // HTTPServer+ArduinoABI.swift
-// C-ABI for http_server (UNO R4 WiFi)
 
 @_silgen_name("arduino_http_server_begin")
 public func arduino_http_server_begin(_ port: UInt16) -> I32
@@ -12,6 +11,9 @@ public func arduino_http_server_client_available() -> I32
 
 @_silgen_name("arduino_http_server_client_connected")
 public func arduino_http_server_client_connected() -> I32
+
+@_silgen_name("arduino_http_server_client_available_bytes")
+public func arduino_http_server_client_available_bytes() -> I32
 
 @_silgen_name("arduino_http_server_client_read")
 public func arduino_http_server_client_read(_ out: UnsafeMutablePointer<U8>?, _ cap: U32) -> I32

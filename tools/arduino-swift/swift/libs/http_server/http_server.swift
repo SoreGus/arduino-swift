@@ -1,404 +1,632 @@
-// http_server.swift
-// ArduinoSwift - HTTP server (UNO R4 WiFi) - ASCII/bytes only (Embedded Swift friendly)
+//
+//  http_server.swift
+//  ArduinoSwift - Minimal HTTP Server (UNO R4 WiFi)
+//
+//  A tiny HTTP/1.1 server designed for Embedded Swift environments.
+//  It runs cooperatively (tick-based) and integrates with ArduinoRuntime
+//  via ArduinoTickable.
+//
+//  Design goals:
+//  - No Foundation dependency (no CharacterSet, split, trimming, JSONSerialization, etc.)
+//  - Avoid Unicode normalization-heavy APIs to keep the embedded link clean
+//  - Parse HTTP requests using raw bytes (ASCII/UTF-8) with small fixed limits
+//  - Support basic routing for GET and POST
+//  - Provide a small JSON encoder without Dictionaries (ordered tuples instead)
+//
+//  How it works:
+//  - The C++ side exposes a small C-ABI for an underlying WiFi server/client.
+//  - This Swift layer polls for an available client and reads bytes into a buffer.
+//  - It detects the end of headers (\r\n\r\n), parses the request line + headers,
+//    optionally reads Content-Length bytes, routes the request, writes a response,
+//    and closes the connection.
+//
+//  Limitations:
+//  - One request per connection, Connection: close
+//  - Body is read only via Content-Length (no chunked transfer encoding)
+//  - Minimal parsing, intended for LAN/dev usage on microcontrollers
+//
 
 public enum HTTPMethod: U8, Sendable {
-    case GET  = 1
-    case POST = 2
-    case PUT  = 3
-    case DELETE = 4
-    case PATCH  = 5
-    case HEAD   = 6
-    case OPTIONS = 7
+    case get  = 1
+    case post = 2
+}
 
-    static func fromBytes(_ b: [U8]) -> HTTPMethod? {
-        if b.count == 3, b[0] == 0x47, b[1] == 0x45, b[2] == 0x54 { return .GET }
-        if b.count == 4, b[0] == 0x50, b[1] == 0x4F, b[2] == 0x53, b[3] == 0x54 { return .POST }
-        if b.count == 3, b[0] == 0x50, b[1] == 0x55, b[2] == 0x54 { return .PUT }
-        if b.count == 6,
-           b[0] == 0x44, b[1] == 0x45, b[2] == 0x4C, b[3] == 0x45, b[4] == 0x54, b[5] == 0x45 { return .DELETE }
-        if b.count == 5,
-           b[0] == 0x50, b[1] == 0x41, b[2] == 0x54, b[3] == 0x43, b[4] == 0x48 { return .PATCH }
-        if b.count == 4,
-           b[0] == 0x48, b[1] == 0x45, b[2] == 0x41, b[3] == 0x44 { return .HEAD }
-        if b.count == 7,
-           b[0] == 0x4F, b[1] == 0x50, b[2] == 0x54, b[3] == 0x49, b[4] == 0x4F, b[5] == 0x4E, b[6] == 0x53 { return .OPTIONS }
-        return nil
-    }
+public struct HTTPHeader: Sendable {
+    public let name: [U8]
+    public let value: [U8]
 }
 
 public struct HTTPRequest: Sendable {
     public let method: HTTPMethod
-    public let path: String
+    public let path: [U8]
+    public let headers: [HTTPHeader]
     public let body: [U8]
-    public init(method: HTTPMethod, path: String, body: [U8]) {
-        self.method = method
-        self.path = path
-        self.body = body
+
+    public func pathString() -> String { asciiString(path) }
+
+    public func header(_ name: StaticString) -> [U8]? {
+        let n = staticUTF8(name)
+        for h in headers {
+            if asciiCaseInsensitiveEqual(h.name, n) { return h.value }
+        }
+        return nil
+    }
+
+    public func contentLength() -> Int {
+        if let v = header("Content-Length") {
+            return asciiParseInt(v) ?? 0
+        }
+        return 0
     }
 }
 
 public struct HTTPResponse: Sendable {
     public let status: I32
-    public let contentType: String
+    public let contentType: [U8]
     public let body: [U8]
 
-    public init(status: I32, contentType: String, body: [U8]) {
-        self.status = status
-        self.contentType = contentType
-        self.body = body
+    public static func response(
+        _ text: String,
+        status: I32 = 200,
+        contentType: String = "text/plain; charset=utf-8"
+    ) -> HTTPResponse {
+        .init(status: status, contentType: Array(contentType.utf8), body: Array(text.utf8))
     }
 
-    public static func text(_ s: String, status: I32 = 200, contentType: String = "text/plain; charset=utf-8") -> HTTPResponse {
-        let bytes = Array(s.utf8).map { U8($0) }
-        return .init(status: status, contentType: contentType, body: bytes)
+    public static func response(
+        _ data: [U8],
+        status: I32 = 200,
+        contentType: String = "application/octet-stream"
+    ) -> HTTPResponse {
+        .init(status: status, contentType: Array(contentType.utf8), body: data)
     }
 
-    public static func data(_ bytes: [U8], status: I32 = 200, contentType: String = "application/octet-stream") -> HTTPResponse {
-        .init(status: status, contentType: contentType, body: bytes)
+    public static func json(_ v: JSONValue, status: I32 = 200) -> HTTPResponse {
+        .init(
+            status: status,
+            contentType: Array("application/json; charset=utf-8".utf8),
+            body: v.encodeUTF8()
+        )
     }
 }
 
-public struct HTTPServerError: Sendable {
-    public let code: I32
-    public let message: String
-    public init(code: I32, message: String) { self.code = code; self.message = message }
+// ============================================================
+// Lightweight JSON encoder (no Foundation)
+// ============================================================
+
+public enum JSONValue: Sendable {
+    case null
+    case bool(Bool)
+    case number(I32)
+    case string(String)
+    case array([JSONValue])
+    case object([(String, JSONValue)])
+
+    public func encodeUTF8() -> [U8] {
+        var out: [U8] = []
+        out.reserveCapacity(64)
+        encode(into: &out)
+        return out
+    }
+
+    private func encode(into out: inout [U8]) {
+        switch self {
+        case .null:
+            out += Array("null".utf8)
+
+        case .bool(let b):
+            out += Array((b ? "true" : "false").utf8)
+
+        case .number(let n):
+            out += asciiInt(n)
+
+        case .string(let s):
+            out.append(0x22)
+            encodeJSONString(s, into: &out)
+            out.append(0x22)
+
+        case .array(let arr):
+            out.append(0x5B)
+            var first = true
+            for v in arr {
+                if !first { out.append(0x2C) }
+                first = false
+                v.encode(into: &out)
+            }
+            out.append(0x5D)
+
+        case .object(let obj):
+            out.append(0x7B)
+            var first = true
+            for (k, v) in obj {
+                if !first { out.append(0x2C) }
+                first = false
+                out.append(0x22)
+                encodeJSONString(k, into: &out)
+                out.append(0x22)
+                out.append(0x3A)
+                v.encode(into: &out)
+            }
+            out.append(0x7D)
+        }
+    }
 }
+
+@inline(__always)
+private func encodeJSONString(_ s: String, into out: inout [U8]) {
+    for b in s.utf8 {
+        switch b {
+        case 0x5C: out += Array("\\\\".utf8)
+        case 0x22: out += Array("\\\"".utf8)
+        case 0x0A: out += Array("\\n".utf8)
+        case 0x0D: out += Array("\\r".utf8)
+        case 0x09: out += Array("\\t".utf8)
+        default:   out.append(b)
+        }
+    }
+}
+
+// ============================================================
+// HTTPServer (ArduinoTickable)
+// ============================================================
 
 public final class HTTPServer: ArduinoTickable {
 
     public typealias Handler = (HTTPRequest) -> HTTPResponse
-    public typealias Failure = (HTTPServerError) -> Void
+    public typealias FailureHandler = (HTTPServerError) -> Void
 
-    private struct Route {
-        let method: HTTPMethod
-        let pathBytes: [U8]
-        let handler: Handler
+    public struct Route: Sendable {
+        public let method: HTTPMethod
+        public let path: [U8]
+        public let handler: Handler
+
+        public init(method: HTTPMethod, path: [U8], handler: @escaping Handler) {
+            self.method = method
+            self.path = path
+            self.handler = handler
+        }
+    }
+
+    public struct HTTPServerError: Sendable {
+        public let message: String
+        public init(_ message: String) { self.message = message }
     }
 
     private var routes: [Route] = []
-    private var failure: Failure?
+    private var failure: FailureHandler?
 
-    private var running: Bool = false
     private var port: UInt16 = 80
+    private var running: Bool = false
 
     private var rx: [U8] = []
+    private var headerEndIndex: Int = -1
+    private var expectedBodyLen: Int = 0
 
-    private let headerMaxBytes: Int = 1024
-    private let bodyMaxBytes: Int = 1024
+    private let headerMaxBytes: Int = 2048
+    private let bodyMaxBytes: Int = 2048
+    private let bodyWaitMs: U32 = 8000
+    private let pollMs: U32 = 5
+
+    private var nextPollAt: U32 = 0
+    private var bodyWaitStart: U32 = 0
 
     public init() {}
 
-    // (opcional) se você quiser mesmo esse helper
-    public func addToRuntime() { ArduinoRuntime.add(self) }
+    public func onFailure(_ cb: @escaping FailureHandler) {
+        self.failure = cb
+    }
 
-    public func onFailure(_ f: @escaping Failure) { self.failure = f }
+    public func get(_ path: String, _ handler: @escaping Handler) {
+        routes.append(.init(method: .get, path: Array(path.utf8), handler: handler))
+    }
 
-    public func get(_ path: String, _ h: @escaping Handler) { addRoute(.GET, path, h) }
-    public func post(_ path: String, _ h: @escaping Handler) { addRoute(.POST, path, h) }
-    public func put(_ path: String, _ h: @escaping Handler) { addRoute(.PUT, path, h) }
-    public func delete(_ path: String, _ h: @escaping Handler) { addRoute(.DELETE, path, h) }
+    public func post(_ path: String, _ handler: @escaping Handler) {
+        routes.append(.init(method: .post, path: Array(path.utf8), handler: handler))
+    }
 
     @discardableResult
     public func start(port: UInt16 = 80) -> Bool {
         self.port = port
         let rc = arduino_http_server_begin(port)
         if rc != 1 {
-            fail(code: rc, msg: "arduino_http_server_begin failed")
+            failure?(.init("arduino_http_server_begin failed"))
             running = false
             return false
         }
         running = true
+        resetRx()
         return true
     }
 
     public func stop() {
-        running = false
         arduino_http_server_end()
+        running = false
+        resetRx()
     }
+
+    public func addToRuntime() { ArduinoRuntime.add(self) }
 
     public func tick() {
         if !running { return }
-        if arduino_http_server_client_available() != 1 { return }
 
-        rx.removeAll(keepingCapacity: true)
+        let now = arduino_millis()
+        if now < nextPollAt { return }
+        nextPollAt = now &+ pollMs
 
-        if !readUntilHeaderEnd(maxBytes: headerMaxBytes) {
-            arduino_http_server_client_stop()
+        if arduino_http_server_client_available() != 1 {
             return
         }
 
-        guard let (method, pathBytes, contentLength) = parseHeader(rx) else {
-            sendSimple(status: 400, contentType: "text/plain; charset=utf-8", body: asciiBytes("Bad Request\n"))
-            arduino_http_server_client_stop()
+        readAvailableIntoRx()
+
+        if headerEndIndex < 0 {
+            headerEndIndex = findHeaderEnd(rx)
+            if headerEndIndex >= 0 {
+                expectedBodyLen = parseContentLength(rx, headerEndIndex: headerEndIndex) ?? 0
+                if expectedBodyLen > bodyMaxBytes { expectedBodyLen = bodyMaxBytes }
+                bodyWaitStart = arduino_millis()
+            } else {
+                if rx.count > headerMaxBytes {
+                    failAndClose("Header too large")
+                }
+                return
+            }
+        }
+
+        let headerEnd = headerEndIndex
+        let haveBodyBytes = rx.count - headerEnd
+
+        if expectedBodyLen > 0 && haveBodyBytes < expectedBodyLen {
+            if (arduino_millis() &- bodyWaitStart) > bodyWaitMs {
+                failAndClose("Body timeout (need \(expectedBodyLen), have \(haveBodyBytes))")
+            }
             return
         }
 
-        var body: [U8] = []
-        if contentLength > 0 {
-            let toRead = min(contentLength, bodyMaxBytes)
-            body = readBody(exactly: toRead)
+        guard let req = parseRequest(rx, headerEndIndex: headerEndIndex, bodyLen: expectedBodyLen) else {
+            failAndClose("Bad request")
+            return
         }
 
-        let path = asciiString(pathBytes)
-        let req = HTTPRequest(method: method, path: path, body: body)
-
-        if let h = matchRoute(method: method, pathBytes: pathBytes) {
-            let resp = h(req)
-            send(resp)
-        } else {
-            sendSimple(status: 404, contentType: "text/plain; charset=utf-8", body: asciiBytes("Not Found\n"))
-        }
-
+        let resp = route(req) ?? .response("Not Found\n", status: 404, contentType: "text/plain; charset=utf-8")
+        writeResponse(resp)
         arduino_http_server_client_stop()
+        resetRx()
     }
 
-    // ------- routes -------
-    private func addRoute(_ method: HTTPMethod, _ path: String, _ h: @escaping Handler) {
-        routes.append(Route(method: method, pathBytes: asciiBytes(path), handler: h))
+    private func resetRx() {
+        rx.removeAll(keepingCapacity: true)
+        headerEndIndex = -1
+        expectedBodyLen = 0
+        bodyWaitStart = 0
     }
 
-    private func matchRoute(method: HTTPMethod, pathBytes: [U8]) -> Handler? {
+    private func failAndClose(_ msg: String) {
+        failure?(.init(msg))
+        arduino_http_server_client_stop()
+        resetRx()
+    }
+
+    private func route(_ req: HTTPRequest) -> HTTPResponse? {
         for r in routes {
-            if r.method != method { continue }
-            if bytesEqual(r.pathBytes, pathBytes) { return r.handler }
+            if r.method == req.method && r.path == req.path {
+                return r.handler(req)
+            }
         }
         return nil
     }
 
-    // ------- IO -------
-    private func readIntoRX(maxBytes: Int) {
-        if maxBytes <= 0 { return }
-        var tmp = [U8](repeating: 0, count: maxBytes)
-        let cap = U32(tmp.count)
+    private func readAvailableIntoRx() {
+        var safety = 0
+        while safety < 16 {
+            safety += 1
 
-        let n: I32 = tmp.withUnsafeMutableBufferPointer { p in
-            arduino_http_server_client_read(p.baseAddress, cap)
-        }
-        if n > 0 {
-            rx.append(contentsOf: tmp[0..<Int(n)])
-        }
-    }
+            let av = arduino_http_server_client_available_bytes()
+            if av <= 0 { break }
 
-    private func readUntilHeaderEnd(maxBytes: Int) -> Bool {
-        while rx.count < maxBytes {
-            if arduino_http_server_client_connected() != 1 { return false }
-            readIntoRX(maxBytes: 64)
-            if rx.count >= 4, findHeaderEnd(rx) != -1 { return true }
-        }
-        return false
-    }
+            let maxRead = min(Int(av), 256)
 
-    private func readBody(exactly n: Int) -> [U8] {
-        var out: [U8] = []
-        out.reserveCapacity(n)
+            var tmp = [U8](repeating: 0, count: maxRead)
+            let cap = U32(maxRead)
 
-        while out.count < n {
-            if arduino_http_server_client_connected() != 1 { break }
-            let need = n - out.count
-            var tmp = [U8](repeating: 0, count: min(64, need))
-            let cap = U32(tmp.count)
-
-            let got: I32 = tmp.withUnsafeMutableBufferPointer { p in
+            let n: I32 = tmp.withUnsafeMutableBufferPointer { p in
                 arduino_http_server_client_read(p.baseAddress, cap)
             }
-            if got > 0 {
-                out.append(contentsOf: tmp[0..<Int(got)])
+
+            if n <= 0 { break }
+            let nn = Int(n)
+            if nn > 0 {
+                rx.append(contentsOf: tmp[0..<nn])
+            }
+
+            if rx.count > (headerMaxBytes + bodyMaxBytes) {
+                break
             }
         }
-        return out
     }
 
-    private func send(_ resp: HTTPResponse) {
-        var head: [U8] = []
-        head.reserveCapacity(128)
+    private func writeResponse(_ resp: HTTPResponse) {
+        var out: [U8] = []
+        out.reserveCapacity(128 + resp.body.count)
 
-        head += asciiBytes("HTTP/1.1 ")
-        head += asciiBytes(statusLine(resp.status))
-        head += asciiBytes("\r\nContent-Type: ")
-        head += asciiBytes(resp.contentType)
-        head += asciiBytes("\r\nContent-Length: ")
-        head += asciiBytes(intToASCII(resp.body.count))
-        head += asciiBytes("\r\nConnection: close\r\n\r\n")
+        out += Array("HTTP/1.1 ".utf8)
+        out += asciiInt(resp.status)
+        out.append(0x20)
+        out += statusReason(resp.status)
+        out += Array("\r\n".utf8)
 
-        _ = writeBytes(head)
-        _ = writeBytes(resp.body)
-    }
+        out += Array("Content-Type: ".utf8)
+        out += resp.contentType
+        out += Array("\r\n".utf8)
 
-    private func sendSimple(status: I32, contentType: String, body: [U8]) {
-        send(HTTPResponse(status: status, contentType: contentType, body: body))
-    }
+        out += Array("Connection: close\r\n".utf8)
 
-    @discardableResult
-    private func writeBytes(_ bytes: [U8]) -> Bool {
-        if bytes.isEmpty { return true }
-        let n: I32 = bytes.withUnsafeBufferPointer { p in
-            arduino_http_server_client_write(p.baseAddress, U32(bytes.count))
+        out += Array("Content-Length: ".utf8)
+        out += asciiInt(I32(resp.body.count))
+        out += Array("\r\n\r\n".utf8)
+
+        out.withUnsafeBufferPointer { p in
+            _ = arduino_http_server_client_write(p.baseAddress, U32(out.count))
         }
-        return n == I32(bytes.count)
+
+        if !resp.body.isEmpty {
+            resp.body.withUnsafeBufferPointer { p in
+                _ = arduino_http_server_client_write(p.baseAddress, U32(resp.body.count))
+            }
+        }
     }
+}
 
-    // ------- parsing -------
-    private func parseHeader(_ buf: [U8]) -> (HTTPMethod, [U8], Int)? {
-        let end = findHeaderEnd(buf)
-        if end < 0 { return nil }
+// ============================================================
+// Parsing helpers (ASCII/bytes only)
+// ============================================================
 
-        var i = 0
-        let m0 = i
-        while i < end, buf[i] != 0x20 { i += 1 }
-        if i == m0 { return nil }
-        let methodBytes = Array(buf[m0..<i])
-        guard let method = HTTPMethod.fromBytes(methodBytes) else { return nil }
+@inline(__always)
+private func statusReason(_ status: I32) -> [U8] {
+    switch status {
+    case 200: return Array("OK".utf8)
+    case 201: return Array("Created".utf8)
+    case 204: return Array("No Content".utf8)
+    case 400: return Array("Bad Request".utf8)
+    case 401: return Array("Unauthorized".utf8)
+    case 403: return Array("Forbidden".utf8)
+    case 404: return Array("Not Found".utf8)
+    case 405: return Array("Method Not Allowed".utf8)
+    case 413: return Array("Payload Too Large".utf8)
+    case 500: return Array("Internal Server Error".utf8)
+    default:  return Array("OK".utf8)
+    }
+}
+
+@inline(__always)
+private func findHeaderEnd(_ bytes: [U8]) -> Int {
+    if bytes.count < 4 { return -1 }
+    var i = 3
+    while i < bytes.count {
+        if bytes[i-3] == 13 && bytes[i-2] == 10 && bytes[i-1] == 13 && bytes[i] == 10 {
+            return i + 1
+        }
         i += 1
-
-        let p0 = i
-        while i < end, buf[i] != 0x20 { i += 1 }
-        if i == p0 { return nil }
-        var pathBytes = Array(buf[p0..<i])
-
-        if let q = indexOfByte(pathBytes, 0x3F) {
-            pathBytes = Array(pathBytes[0..<q])
-        }
-
-        let cl = parseContentLength(buf, headerEndIndex: end)
-        return (method, pathBytes, cl)
     }
+    return -1
+}
 
-    private func parseContentLength(_ buf: [U8], headerEndIndex: Int) -> Int {
-        var i = 0
-        while i + 1 < headerEndIndex {
-            if buf[i] == 0x0D, buf[i+1] == 0x0A { i += 2; break }
-            i += 1
-        }
+private func parseRequest(_ bytes: [U8], headerEndIndex: Int, bodyLen: Int) -> HTTPRequest? {
+    let header = Array(bytes[0..<headerEndIndex])
 
-        while i + 1 < headerEndIndex {
-            if buf[i] == 0x0D, buf[i+1] == 0x0A { break }
+    guard let lineEnd = findCRLF(header, start: 0) else { return nil }
+    let reqLine = Array(header[0..<lineEnd])
 
-            var j = i
-            while j < headerEndIndex, buf[j] != 0x3A,
-                  !(buf[j] == 0x0D && j+1 < headerEndIndex && buf[j+1] == 0x0A) {
-                j += 1
-            }
-            if j < headerEndIndex, buf[j] == 0x3A {
-                if asciiKeyEquals(buf, i, j, "content-length") {
-                    var k = j + 1
-                    while k < headerEndIndex, buf[k] == 0x20 { k += 1 }
-                    var value = 0
-                    while k < headerEndIndex {
-                        let c = buf[k]
-                        if c >= 0x30 && c <= 0x39 {
-                            value = value * 10 + Int(c - 0x30)
-                            k += 1
-                        } else { break }
-                    }
-                    return value
-                }
-            }
+    var p = 0
+    let mEnd = findByte(reqLine, byte: 0x20, start: p) ?? -1
+    if mEnd < 0 { return nil }
+    let methodBytes = Array(reqLine[p..<mEnd])
+    p = mEnd + 1
 
-            while i + 1 < headerEndIndex {
-                if buf[i] == 0x0D, buf[i+1] == 0x0A { i += 2; break }
-                i += 1
-            }
-        }
-        return 0
-    }
+    let pathEnd = findByte(reqLine, byte: 0x20, start: p) ?? -1
+    if pathEnd < 0 { return nil }
+    let pathBytes = Array(reqLine[p..<pathEnd])
 
-    private func findHeaderEnd(_ buf: [U8]) -> Int {
-        if buf.count < 4 { return -1 }
-        var i = 0
-        while i + 3 < buf.count {
-            if buf[i] == 0x0D, buf[i+1] == 0x0A, buf[i+2] == 0x0D, buf[i+3] == 0x0A {
-                return i
-            }
-            i += 1
-        }
-        return -1
-    }
-
-    // ------- utils -------
-    private func fail(code: I32, msg: String) { failure?(HTTPServerError(code: code, message: msg)) }
-
-    private func statusLine(_ status: I32) -> String {
-        switch status {
-        case 200: return "200 OK"
-        case 400: return "400 Bad Request"
-        case 404: return "404 Not Found"
-        case 500: return "500 Internal Server Error"
-        default:  return "\(status) OK"
-        }
-    }
-
-    private func bytesEqual(_ a: [U8], _ b: [U8]) -> Bool {
-        if a.count != b.count { return false }
-        var i = 0
-        while i < a.count {
-            if a[i] != b[i] { return false }
-            i += 1
-        }
-        return true
-    }
-
-    private func indexOfByte(_ a: [U8], _ v: U8) -> Int? {
-        var i = 0
-        while i < a.count {
-            if a[i] == v { return i }
-            i += 1
-        }
+    let method: HTTPMethod
+    if asciiEqual(methodBytes, Array("GET".utf8)) {
+        method = .get
+    } else if asciiEqual(methodBytes, Array("POST".utf8)) {
+        method = .post
+    } else {
         return nil
     }
 
-    private func asciiLower(_ c: U8) -> U8 {
-        if c >= 0x41 && c <= 0x5A { return c &+ 0x20 }
-        return c
+    var headers: [HTTPHeader] = []
+    headers.reserveCapacity(8)
+
+    var cur = lineEnd + 2
+    while cur + 2 <= header.count {
+        if cur + 1 < header.count, header[cur] == 13, header[cur+1] == 10 { break }
+
+        guard let hEnd = findCRLF(header, start: cur) else { break }
+        let line = Array(header[cur..<hEnd])
+        cur = hEnd + 2
+
+        guard let colon = findByte(line, byte: 0x3A, start: 0) else { continue }
+        let name = rtrimSpaces(Array(line[0..<colon]))
+        let value = ltrimSpaces(Array(line[(colon+1)..<line.count]))
+        headers.append(.init(name: name, value: value))
     }
 
-    private func asciiKeyEquals(_ buf: [U8], _ start: Int, _ end: Int, _ key: StaticString) -> Bool {
-        let kb = asciiBytes(key)
-        let len = end - start
-        if len != kb.count { return false }
-        var i = 0
-        while i < len {
-            if asciiLower(buf[start + i]) != kb[i] { return false }
-            i += 1
+    var body: [U8] = []
+    if bodyLen > 0 {
+        let start = headerEndIndex
+        let end = min(bytes.count, start + bodyLen)
+        if end > start {
+            body = Array(bytes[start..<end])
         }
-        return true
     }
 
-    private func asciiBytes(_ s: String) -> [U8] {
-        return Array(s.utf8).map { U8($0) }
+    return .init(method: method, path: pathBytes, headers: headers, body: body)
+}
+
+private func parseContentLength(_ bytes: [U8], headerEndIndex: Int) -> Int? {
+    let header = Array(bytes[0..<headerEndIndex])
+
+    guard let firstCRLF = findCRLF(header, start: 0) else { return nil }
+    var cur = firstCRLF + 2
+
+    let target = Array("Content-Length".utf8)
+
+    while cur + 2 <= header.count {
+        if cur + 1 < header.count, header[cur] == 13, header[cur+1] == 10 { break }
+
+        guard let hEnd = findCRLF(header, start: cur) else { break }
+        let line = Array(header[cur..<hEnd])
+        cur = hEnd + 2
+
+        guard let colon = findByte(line, byte: 0x3A, start: 0) else { continue }
+
+        let name = rtrimSpaces(Array(line[0..<colon]))
+        if !asciiCaseInsensitiveEqual(name, target) { continue }
+
+        let value = ltrimSpaces(Array(line[(colon+1)..<line.count]))
+        return asciiParseInt(value)
     }
 
-    private func asciiBytes(_ s: StaticString) -> [U8] {
-        var out: [U8] = []
-        out.reserveCapacity(s.utf8CodeUnitCount)
-        s.withUTF8Buffer { b in
-            for x in b { out.append(U8(x)) }
-        }
-        return out
+    return nil
+}
+
+@inline(__always)
+private func findCRLF(_ bytes: [U8], start: Int) -> Int? {
+    var i = start + 1
+    while i < bytes.count {
+        if bytes[i-1] == 13 && bytes[i] == 10 { return i - 1 }
+        i += 1
+    }
+    return nil
+}
+
+@inline(__always)
+private func findByte(_ bytes: [U8], byte: U8, start: Int) -> Int? {
+    var i = start
+    while i < bytes.count {
+        if bytes[i] == byte { return i }
+        i += 1
+    }
+    return nil
+}
+
+@inline(__always)
+private func ltrimSpaces(_ bytes: [U8]) -> [U8] {
+    var i = 0
+    while i < bytes.count && (bytes[i] == 0x20 || bytes[i] == 0x09) { i += 1 }
+    if i == 0 { return bytes }
+    return Array(bytes[i..<bytes.count])
+}
+
+@inline(__always)
+private func rtrimSpaces(_ bytes: [U8]) -> [U8] {
+    if bytes.isEmpty { return bytes }
+    var j = bytes.count - 1
+    while true {
+        let b = bytes[j]
+        if b != 0x20 && b != 0x09 { break }
+        if j == 0 { return [] }
+        j -= 1
+    }
+    return Array(bytes[0...j])
+}
+
+@inline(__always)
+private func asciiEqual(_ a: [U8], _ b: [U8]) -> Bool {
+    if a.count != b.count { return false }
+    var i = 0
+    while i < a.count {
+        if a[i] != b[i] { return false }
+        i += 1
+    }
+    return true
+}
+
+@inline(__always)
+private func asciiCaseInsensitiveEqual(_ a: [U8], _ b: [U8]) -> Bool {
+    if a.count != b.count { return false }
+    var i = 0
+    while i < a.count {
+        if asciiLower(a[i]) != asciiLower(b[i]) { return false }
+        i += 1
+    }
+    return true
+}
+
+@inline(__always)
+private func asciiLower(_ b: U8) -> U8 {
+    if b >= 0x41 && b <= 0x5A { return b &+ 0x20 }
+    return b
+}
+
+@inline(__always)
+private func asciiParseInt(_ bytes: [U8]) -> Int? {
+    var i = 0
+    while i < bytes.count && (bytes[i] == 0x20 || bytes[i] == 0x09) { i += 1 }
+    if i >= bytes.count { return nil }
+
+    var sign = 1
+    if bytes[i] == 0x2D { sign = -1; i += 1 }
+
+    var val = 0
+    var any = false
+    while i < bytes.count {
+        let b = bytes[i]
+        if b < 0x30 || b > 0x39 { break }
+        any = true
+        val = val * 10 + Int(b - 0x30)
+        i += 1
+    }
+    return any ? (val * sign) : nil
+}
+
+@inline(__always)
+private func asciiInt(_ v: I32) -> [U8] {
+    var n = v
+    if n == 0 { return [0x30] }
+
+    var out: [U8] = []
+    if n < 0 { out.append(0x2D); n = -n }
+
+    var tmp: [U8] = []
+    while n > 0 {
+        let d = U8(n % 10)
+        tmp.append(0x30 &+ d)
+        n /= 10
     }
 
-    private func asciiString(_ bytes: [U8]) -> String {
-        var c: [CChar] = bytes.map { CChar(bitPattern: $0) }
-        c.append(0)
-        return String(cString: c)
+    var i = tmp.count
+    while i > 0 {
+        i -= 1
+        out.append(tmp[i])
     }
 
-    private func intToASCII(_ n: Int) -> String {
-        if n == 0 { return "0" }
-        var x = n
-        var tmp: [U8] = []
-        while x > 0 {
-            let d = x % 10
-            tmp.append(U8(0x30 + d))
-            x /= 10
-        }
-        var out: [CChar] = []
-        out.reserveCapacity(tmp.count + 1)
-        var i = tmp.count
-        while i > 0 {
-            i -= 1
-            out.append(CChar(bitPattern: tmp[i]))
-        }
-        out.append(0)
-        return String(cString: out)
+    return out
+}
+
+@inline(__always)
+private func asciiString(_ bytes: [U8]) -> String {
+    var buf = [CChar](repeating: 0, count: bytes.count + 1)
+    var i = 0
+    while i < bytes.count {
+        buf[i] = CChar(bitPattern: bytes[i])
+        i += 1
     }
+    return String(cString: buf)
+}
+
+@inline(__always)
+private func staticUTF8(_ s: StaticString) -> [U8] {
+    let utf8 = s.utf8Start
+    let len = s.utf8CodeUnitCount
+    var out: [U8] = []
+    out.reserveCapacity(len)
+    var i = 0
+    while i < len {
+        out.append(U8(utf8[i]))
+        i += 1
+    }
+    return out
 }
