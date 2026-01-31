@@ -25,6 +25,13 @@
 //  - Body is read only via Content-Length (no chunked transfer encoding)
 //  - Minimal parsing, intended for LAN/dev usage on microcontrollers
 //
+//  JSON notes:
+//  - JSON numbers: int (I32) and float (F32)
+//  - Parser supports: object/array/string/number/bool/null + basic escapes
+//  - Not supported: \uXXXX, scientific notation (1e-3), NaN/Inf in encoder
+//
+
+public typealias F32 = Float
 
 public enum HTTPMethod: U8, Sendable {
     case get  = 1
@@ -44,6 +51,7 @@ public struct HTTPRequest: Sendable {
 
     public func pathString() -> String { asciiString(path) }
 
+    /// Case-insensitive ASCII header lookup (e.g. "Content-Length", "Content-Type")
     public func header(_ name: StaticString) -> [U8]? {
         let n = staticUTF8(name)
         for h in headers {
@@ -57,6 +65,27 @@ public struct HTTPRequest: Sendable {
             return asciiParseInt(v) ?? 0
         }
         return 0
+    }
+}
+
+// ============================================================
+// Request JSON helpers (no Foundation)
+// ============================================================
+
+public extension HTTPRequest {
+
+    /// True when Content-Type begins with "application/json" (case-insensitive),
+    /// accepting suffixes like "; charset=utf-8".
+    func isJSON() -> Bool {
+        guard let ct = header("Content-Type") else { return false }
+        return asciiHasPrefixCaseInsensitive(ct, Array("application/json".utf8))
+    }
+
+    /// Parse the request body as JSON only if Content-Type is application/json.
+    /// Returns nil if not JSON or if parsing fails.
+    func jsonBody() -> JSONValue? {
+        guard isJSON() else { return nil }
+        return JSONParser.parse(body)
     }
 }
 
@@ -98,6 +127,7 @@ public enum JSONValue: Sendable {
     case null
     case bool(Bool)
     case number(I32)
+    case numberF(F32)
     case string(String)
     case array([JSONValue])
     case object([(String, JSONValue)])
@@ -119,6 +149,9 @@ public enum JSONValue: Sendable {
 
         case .number(let n):
             out += asciiInt(n)
+
+        case .numberF(let f):
+            out += asciiFloat(f, decimals: 4)
 
         case .string(let s):
             out.append(0x22)
@@ -167,6 +200,224 @@ private func encodeJSONString(_ s: String, into out: inout [U8]) {
 }
 
 // ============================================================
+// Lightweight JSON parser (no Foundation)
+// - Supports: object/array/string/number(int/float)/bool/null + basic escapes
+// - Not supported: \uXXXX, scientific notation (1e-3)
+// ============================================================
+
+public enum JSONParser {
+
+    public static func parse(_ bytes: [U8]) -> JSONValue? {
+        var p = Parser(bytes)
+        p.skipWS()
+        guard let v = p.parseValue() else { return nil }
+        p.skipWS()
+        return p.isAtEnd ? v : nil
+    }
+
+    private struct Parser {
+        let b: [U8]
+        var i: Int = 0
+
+        init(_ b: [U8]) { self.b = b }
+
+        var isAtEnd: Bool { i >= b.count }
+
+        mutating func skipWS() {
+            while i < b.count {
+                let c = b[i]
+                if c == 0x20 || c == 0x0A || c == 0x0D || c == 0x09 { i += 1 }
+                else { break }
+            }
+        }
+
+        mutating func parseValue() -> JSONValue? {
+            skipWS()
+            if isAtEnd { return nil }
+
+            switch b[i] {
+            case 0x7B: return parseObject()        // {
+            case 0x5B: return parseArray()         // [
+            case 0x22: return parseStringValue()   // "
+            case 0x74: return parseLiteral("true",  value: .bool(true))
+            case 0x66: return parseLiteral("false", value: .bool(false))
+            case 0x6E: return parseLiteral("null",  value: .null)
+            case 0x2D, 0x30...0x39:
+                return parseNumber()
+            default:
+                return nil
+            }
+        }
+
+        mutating func parseLiteral(_ s: String, value: JSONValue) -> JSONValue? {
+            let lit = Array(s.utf8)
+            if i + lit.count > b.count { return nil }
+            var k = 0
+            while k < lit.count {
+                if b[i + k] != lit[k] { return nil }
+                k += 1
+            }
+            i += lit.count
+            return .some(value)
+        }
+
+        mutating func parseObject() -> JSONValue? {
+            i += 1 // {
+            skipWS()
+
+            var items: [(String, JSONValue)] = []
+            items.reserveCapacity(8)
+
+            if consume(0x7D) { return .some(.object(items)) } // }
+
+            while true {
+                skipWS()
+                guard let key = parseString() else { return nil }
+                skipWS()
+                guard consume(0x3A) else { return nil } // :
+                skipWS()
+                guard let val = parseValue() else { return nil }
+                items.append((key, val))
+                skipWS()
+
+                if consume(0x2C) { // ,
+                    continue
+                } else if consume(0x7D) { // }
+                    break
+                } else {
+                    return nil
+                }
+            }
+
+            return .some(.object(items))
+        }
+
+        mutating func parseArray() -> JSONValue? {
+            i += 1 // [
+            skipWS()
+
+            var arr: [JSONValue] = []
+            arr.reserveCapacity(8)
+
+            if consume(0x5D) { return .some(.array(arr)) } // ]
+
+            while true {
+                skipWS()
+                guard let v = parseValue() else { return nil }
+                arr.append(v)
+                skipWS()
+
+                if consume(0x2C) { // ,
+                    continue
+                } else if consume(0x5D) { // ]
+                    break
+                } else {
+                    return nil
+                }
+            }
+
+            return .some(.array(arr))
+        }
+
+        mutating func parseStringValue() -> JSONValue? {
+            guard let s = parseString() else { return nil }
+            return .some(.string(s))
+        }
+
+        mutating func parseString() -> String? {
+            guard consume(0x22) else { return nil } // "
+
+            var out: [U8] = []
+            out.reserveCapacity(32)
+
+            while i < b.count {
+                let c = b[i]
+                i += 1
+
+                if c == 0x22 { // "
+                    return asciiString(out)
+                }
+
+                if c == 0x5C { // \
+                    if i >= b.count { return nil }
+                    let e = b[i]
+                    i += 1
+                    switch e {
+                    case 0x22: out.append(0x22) // "
+                    case 0x5C: out.append(0x5C) // \
+                    case 0x6E: out.append(0x0A) // n -> \n
+                    case 0x72: out.append(0x0D) // r -> \r
+                    case 0x74: out.append(0x09) // t -> \t
+                    default:
+                        // escapes não suportados (ex: \uXXXX)
+                        return nil
+                    }
+                } else {
+                    out.append(c)
+                }
+            }
+
+            return nil
+        }
+
+        // Supports:
+        // -123
+        // 3.1416
+        // Requires at least one digit before '.' and at least one after '.' if '.' is present.
+        mutating func parseNumber() -> JSONValue? {
+            let start = i
+
+            _ = consume(0x2D) // optional '-'
+
+            var intDigits = 0
+            while i < b.count {
+                let c = b[i]
+                if c < 0x30 || c > 0x39 { break }
+                intDigits += 1
+                i += 1
+            }
+            if intDigits == 0 { i = start; return nil }
+
+            var hasDot = false
+            if i < b.count, b[i] == 0x2E { // '.'
+                hasDot = true
+                i += 1
+
+                var fracDigits = 0
+                while i < b.count {
+                    let c = b[i]
+                    if c < 0x30 || c > 0x39 { break }
+                    fracDigits += 1
+                    i += 1
+                }
+
+                // "3." is invalid JSON
+                if fracDigits == 0 { i = start; return nil }
+            }
+
+            let slice = Array(b[start..<i])
+
+            if !hasDot {
+                guard let n = asciiParseInt(slice) else { return nil }
+                if n < Int(Int32.min) || n > Int(Int32.max) { return nil }
+                return .some(.number(I32(n)))
+            } else {
+                guard let f = asciiParseFloat(slice) else { return nil }
+                return .some(.numberF(f))
+            }
+        }
+
+        mutating func consume(_ byte: U8) -> Bool {
+            if i < b.count, b[i] == byte {
+                i += 1
+                return true
+            }
+            return false
+        }
+    }
+}
+
+// ============================================================
 // HTTPServer (ArduinoTickable)
 // ============================================================
 
@@ -175,7 +426,7 @@ public final class HTTPServer: ArduinoTickable {
     public typealias Handler = (HTTPRequest) -> HTTPResponse
     public typealias FailureHandler = (HTTPServerError) -> Void
 
-    public struct Route: Sendable {
+    public struct Route { // NOTE: NOT Sendable (Swift 6 closure rules)
         public let method: HTTPMethod
         public let path: [U8]
         public let handler: Handler
@@ -187,7 +438,7 @@ public final class HTTPServer: ArduinoTickable {
         }
     }
 
-    public struct HTTPServerError: Sendable {
+    public struct HTTPServerError {
         public let message: String
         public init(_ message: String) { self.message = message }
     }
@@ -556,6 +807,17 @@ private func asciiCaseInsensitiveEqual(_ a: [U8], _ b: [U8]) -> Bool {
 }
 
 @inline(__always)
+private func asciiHasPrefixCaseInsensitive(_ bytes: [U8], _ prefix: [U8]) -> Bool {
+    if bytes.count < prefix.count { return false }
+    var i = 0
+    while i < prefix.count {
+        if asciiLower(bytes[i]) != asciiLower(prefix[i]) { return false }
+        i += 1
+    }
+    return true
+}
+
+@inline(__always)
 private func asciiLower(_ b: U8) -> U8 {
     if b >= 0x41 && b <= 0x5A { return b &+ 0x20 }
     return b
@@ -583,6 +845,46 @@ private func asciiParseInt(_ bytes: [U8]) -> Int? {
 }
 
 @inline(__always)
+private func asciiParseFloat(_ bytes: [U8]) -> F32? {
+    var i = 0
+    while i < bytes.count && (bytes[i] == 0x20 || bytes[i] == 0x09) { i += 1 }
+    if i >= bytes.count { return nil }
+
+    var sign: F32 = F32(1)
+    if bytes[i] == 0x2D { sign = -F32(1); i += 1 }
+
+    var intPart: F32 = F32(0)
+    var anyInt = false
+    while i < bytes.count {
+        let c = bytes[i]
+        if c < 0x30 || c > 0x39 { break }
+        anyInt = true
+        intPart = intPart * F32(10) + F32(Int(c - 0x30))
+        i += 1
+    }
+    if !anyInt { return nil }
+
+    var fracPart: F32 = F32(0)
+    var fracDiv: F32 = F32(1)
+
+    if i < bytes.count, bytes[i] == 0x2E { // '.'
+        i += 1
+        var anyFrac = false
+        while i < bytes.count {
+            let c = bytes[i]
+            if c < 0x30 || c > 0x39 { break }
+            anyFrac = true
+            fracPart = fracPart * F32(10) + F32(Int(c - 0x30))
+            fracDiv *= F32(10)
+            i += 1
+        }
+        if !anyFrac { return nil }
+    }
+
+    return sign * (intPart + (fracPart / fracDiv))
+}
+
+@inline(__always)
 private func asciiInt(_ v: I32) -> [U8] {
     var n = v
     if n == 0 { return [0x30] }
@@ -601,6 +903,50 @@ private func asciiInt(_ v: I32) -> [U8] {
     while i > 0 {
         i -= 1
         out.append(tmp[i])
+    }
+
+    return out
+}
+
+@inline(__always)
+private func pow10F32(_ n: I32) -> F32 {
+    var r: F32 = F32(1)
+    var k = n
+    while k > 0 {
+        r *= F32(10)
+        k -= 1
+    }
+    return r
+}
+
+// Fixed decimals encoder (simple, no Foundation)
+// - clamps NaN/Inf to "0" (JSON disallows NaN/Inf)
+@inline(__always)
+private func asciiFloat(_ f: F32, decimals: I32) -> [U8] {
+    var x = f
+    if x.isNaN || x.isInfinite { return [0x30] }
+
+    var out: [U8] = []
+    if x < F32(0) {
+        out.append(0x2D)
+        x = -x
+    }
+
+    let scale: F32 = pow10F32(decimals)
+    let scaled: I32 = I32(x * scale + F32(0.5)) // round (avoid Duration literal inference)
+    let intPart: I32 = scaled / I32(scale)
+    let fracPart: I32 = scaled % I32(scale)
+
+    out += asciiInt(intPart)
+
+    if decimals > 0 {
+        out.append(0x2E)
+
+        // zero-pad fractional
+        let fracStr = asciiInt(fracPart)
+        let need = Int(decimals) - fracStr.count
+        if need > 0 { out += [U8](repeating: 0x30, count: need) }
+        out += fracStr
     }
 
     return out

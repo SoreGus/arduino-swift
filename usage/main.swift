@@ -78,10 +78,22 @@ public func arduino_swift_main() {
         )
     }
 
+    server.post("/send") { req in
+        guard let j = req.jsonBody() else {
+            return .json(.object([
+                ("ok", .bool(false)),
+                ("error", .string("Expected application/json body"))
+            ]), status: 400)
+        }
+
+        return .json(.object([
+            ("ok", .bool(true)),
+            ("received", j)
+        ]))
+    }
+
     _ = server.start(port: 80)
     ArduinoRuntime.add(server)
 
-    ArduinoRuntime.keepAlive {
-        delay(1000)
-    }
+    ArduinoRuntime.keepAlive()
 }
