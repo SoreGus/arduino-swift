@@ -27,7 +27,7 @@ Common overrides:
 # Force a specific swiftc
 SWIFTC=/path/to/swiftc ../tools/arduino-swift/arduino-swift build
 
-# Force a specific port (Serial boards)
+# Force a specific port (Serial or DFU "port" depending on board)
 PORT=/dev/cu.usbmodemXXXX ../tools/arduino-swift/arduino-swift upload
 ```
 
@@ -67,13 +67,62 @@ Boards are selected by `config.json` (`"board": "..."`) and resolved through the
 
 Currently used/tested:
 
-| Board key (config.json) | Example FQBN | Notes |
+| Board key (config.json) | Example FQBN | CPU / Notes |
 |---|---|---|
-| `Due` | `arduino:sam:arduino_due_x` | Cortex-M3 |
-| `Minima` | `arduino:renesas_uno:minima` | UNO R4 Minima (Renesas RA4M1, Cortex-M4F). Upload is typically **DFU** (not a `/dev/cu.*` serial port). |
+| `Due` | `arduino:sam:arduino_due_x` | Cortex‑M3 (`armv7-none-none-eabi`) |
+| `R4Minima` | `arduino:renesas_uno:minima` | UNO R4 Minima (Renesas RA4M1, Cortex‑M4F, hard-float). Upload is typically **DFU** (not a `/dev/cu.*` serial port). |
+| `R4WIFI` | `arduino:renesas_uno:unor4wifi` | UNO R4 WiFi (Renesas RA4M1, Cortex‑M4F, hard-float). WiFi is available via the board’s connectivity module + Arduino libraries. |
 | `GigaR1` | `arduino:mbed_giga:giga` | Arduino GIGA R1 (STM32H7). Uses board options (cm7/cm4 split, security, etc.). |
 
-> New boards are added by extending the tool's board database. The goal is that the **same pipeline** works for **Due, Minima, Giga, and future boards**.
+> New boards are added by extending the tool's board database. The goal is that the **same pipeline** works for **Due, R4 Minima, R4 WiFi, Giga, and future boards**.
+
+### Board database (example)
+
+The tool resolves the board key into parameters like FQBN, Swift target, CPU, and (when applicable) floating-point ABI/FPU:
+
+```json
+{
+  "Due": {
+    "fqbn": "arduino:sam:arduino_due_x",
+    "core": "arduino:sam",
+    "api": "due_sam",
+    "swift_target": "armv7-none-none-eabi",
+    "cpu": "cortex-m3"
+  },
+  "R4Minima": {
+    "fqbn": "arduino:renesas_uno:minima",
+    "core": "arduino:renesas_uno",
+    "api": "uno_r4_renesas",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m4",
+    "float_abi": "hard",
+    "fpu": "fpv4-sp-d16"
+  },
+  "R4WIFI": {
+    "fqbn": "arduino:renesas_uno:unor4wifi",
+    "core": "arduino:renesas_uno",
+    "api": "uno_r4_renesas",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m4",
+    "float_abi": "hard",
+    "fpu": "fpv4-sp-d16"
+  },
+  "GigaR1": {
+    "fqbn_base": "arduino:mbed_giga:giga",
+    "core": "arduino:mbed_giga",
+    "api": "giga_mbed",
+    "swift_target": "armv7em-none-none-eabi",
+    "cpu": "cortex-m7",
+    "float_abi": "hard",
+    "fpu": "fpv5-d16",
+    "default_board_options": {
+      "target_core": "cm7",
+      "split": "100_0",
+      "security": "none"
+    }
+  }
+}
+```
 
 ---
 
@@ -96,7 +145,7 @@ Swift and Arduino are linked at the object level (no core patches).
 - `tools/arduino-swift/arduino-swift` - the CLI tool (C)
 - `tools/arduino-swift/swift/core/` - Swift core runtime
 - `tools/arduino-swift/swift/libs/` - built-in Swift libraries
-- `tools/arduino-swift/arduino/commom/` - common Arduino bridge sources used by the staged sketch
+- `tools/arduino-swift/arduino/common/` - common Arduino bridge sources used by the staged sketch
 - `tools/arduino-swift/arduino/libs/<Lib>/*` - tool-shipped Arduino/C++ libraries (**flat layout**, no `/src`)
 
 ### Firmware project layout (your app)
@@ -106,15 +155,14 @@ your_firmware/
   config.json
   main.swift
   libs/                  (optional) project-local Swift libs
-    SSD1306/
-      SSD1306.swift
-      ...
+    SomeLib/
+      SomeLib.swift
   build/                 (generated)
 ```
 
 ---
 
-## Configuration (config.json)
+## Configuration (`config.json`)
 
 Your firmware project declares configuration via a single JSON file:
 
@@ -127,7 +175,7 @@ Your firmware project declares configuration via a single JSON file:
 
 ```json
 {
-  "board": "Due | Minima | GigaR1 | ...",
+  "board": "Due | R4Minima | R4WIFI | GigaR1 | ...",
   "board_options": { "key": "value" },
   "lib": ["SwiftLibA", "SwiftLibB"],
   "arduino_lib": ["ArduinoLibA", "ArduinoLibB"]
@@ -136,7 +184,7 @@ Your firmware project declares configuration via a single JSON file:
 
 ### Fields
 
-#### board
+#### `board`
 
 A key that must exist in the tool's board database. It defines at minimum:
 
@@ -144,7 +192,7 @@ A key that must exist in the tool's board database. It defines at minimum:
 - `swift_target`
 - `cpu` (e.g. `cortex-m3`, `cortex-m4`, `cortex-m7`)
 
-#### board_options (optional)
+#### `board_options` (optional)
 
 Passed to both compile and upload:
 
@@ -153,7 +201,7 @@ Passed to both compile and upload:
 
 This matters for boards like GIGA where you pick things like core split and security.
 
-#### lib (Swift libraries)
+#### `lib` (Swift libraries)
 
 List of Swift libraries to include in the `swiftc` compilation step.
 
@@ -164,7 +212,7 @@ Resolution order (case-insensitive):
 
 These sources are appended to the `swiftc` invocation and compiled into a single `.o`.
 
-#### arduino_lib (Arduino C/C++ libraries)
+#### `arduino_lib` (Arduino C/C++ libraries)
 
 List of Arduino libraries that must be discovered and compiled by Arduino CLI using Arduino's normal library discovery:
 
@@ -181,31 +229,41 @@ Typical use case:
 
 ---
 
-## Examples: config.json per board
+## Examples: `config.json` per board
 
-### Arduino Due (Due)
+### Arduino Due (`Due`)
 
 ```json
 {
   "board": "Due",
-  "lib": ["I2C", "Button", "SSD1306"],
-  "arduino_lib": ["SSD1306Ascii"]
-}
-```
-
-### Arduino UNO R4 Minima (Minima)
-
-```json
-{
-  "board": "Minima",
   "lib": ["I2C", "Button"],
   "arduino_lib": []
 }
 ```
 
-> Upload note (Minima): on many setups `arduino-cli board list` shows a DFU port like `1-1` (protocol `dfu`), not a `/dev/cu.*` serial device. Upload should use that DFU port value (or set `PORT=1-1`).
+### Arduino UNO R4 Minima (`R4Minima`)
 
-### Arduino GIGA R1 (GigaR1)
+```json
+{
+  "board": "R4Minima",
+  "lib": ["I2C", "Button"],
+  "arduino_lib": []
+}
+```
+
+> Upload note (R4 Minima): on many setups `arduino-cli board list` shows a DFU port like `1-1` (protocol `dfu`), not a `/dev/cu.*` serial device. Upload should use that DFU port value (or set `PORT=1-1`).
+
+### Arduino UNO R4 WiFi (`R4WIFI`)
+
+```json
+{
+  "board": "R4WIFI",
+  "lib": ["I2C", "Button", "http_server"],
+  "arduino_lib": []
+}
+```
+
+### Arduino GIGA R1 (`GigaR1`)
 
 ```json
 {
@@ -215,10 +273,105 @@ Typical use case:
     "split": "100_0",
     "security": "none"
   },
-  "lib": ["I2C", "Button", "SSD1306"],
-  "arduino_lib": ["SSD1306Ascii"]
+  "lib": ["I2C", "Button", "http_server"],
+  "arduino_lib": []
 }
 ```
+
+---
+
+## Built-in Swift HTTP server library (`http_server`)
+
+ArduinoSwift ships a small **HTTP/1.1** server written in **pure Swift** (no Foundation). The goal is that the **same HTTP server code** compiles across boards, while the **transport** (WiFi/Ethernet/etc.) is provided by a tiny Arduino-side C/C++ bridge.
+
+### Design goals
+
+- **No Foundation**
+- Byte/ASCII parsing (small fixed limits)
+- Cooperative/tick-based server (no threads)
+- One request per connection (**Connection: close**)
+- JSON encoder/parser without dictionaries (uses ordered tuples)
+
+### What varies across boards?
+
+- The **server** is Swift and should compile for any supported board.
+- The **network backend** depends on the board:
+  - `R4WIFI`: WiFi backend (Arduino networking stack)
+  - `R4Minima`: no built-in WiFi (HTTP server code can compile, but you need a transport backend)
+  - `GigaR1`: backend depends on which connectivity path you implement (WiFi/Ethernet/etc.)
+
+The objective is to keep the Swift-facing API stable, and swap only the backend.
+
+---
+
+## HTTP server usage example
+
+Below is a complete example showing both styles:
+
+1. **Synchronous handler**: returns `HTTPResponse` directly  
+2. **Completion-based handler**: you call `respond(...)` later (useful for async flows)
+
+```swift
+import http_server
+
+// Example async producer (replace with your real component).
+final class SomeObject {
+    func completionHandler(_ cb: @escaping (I32) -> Void) {
+        // In real firmware you might complete on a later tick.
+        cb(123)
+    }
+}
+
+let someObject = SomeObject()
+
+func setupServer() {
+    let server = HTTPServer()
+    _ = server.start(port: 80)
+
+    // 1) Sync handler (return directly)
+    server.get("/hello") { req in
+        .response("hello\n")
+    }
+
+    // 2) Sync JSON response
+    server.post("/json") { req in
+        .json(
+            .object([
+                ("ok", .bool(true)),
+                ("value", .number(123)),
+                ("msg", .string("hello"))
+            ])
+        )
+    }
+
+    // 3) Completion-based response (respond later)
+    server.post("/json_completion") { req, respond in
+        someObject.completionHandler { value in
+            respond(
+                .json(
+                    .object([
+                        ("ok", .bool(true)),
+                        ("value", .number(value)),
+                        ("msg", .string("async hello"))
+                    ])
+                )
+            )
+        }
+    }
+
+    server.onFailure { err in
+        Serial.println("HTTPServer error: " + err.message)
+    }
+
+    server.addToRuntime()
+}
+```
+
+### Notes / constraints
+
+- Completion-based routes should respond within a short time window (keep firmware responsive).
+- The server processes one request at a time (cooperative/tick-based).
+- If you need a queue of pending requests, implement it explicitly (keeping RAM limits in mind).
 
 ---
 
@@ -245,7 +398,7 @@ There are three different "library worlds" involved:
 
 ---
 
-## Staging behavior (what changed)
+## Staging behavior
 
 ArduinoSwift builds in a deterministic workspace:
 
