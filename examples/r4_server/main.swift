@@ -36,8 +36,8 @@ public func arduino_swift_main() {
     println("WiFi status0: \(WiFiS3.status().rawValue)")
 
     let ok = WiFiS3.connectLoop(
-        ssid: "SORE",
-        password: "vStmtv!1",
+        ssid: "*",
+        password: "*",
         attemptDelayMs: 10_000,
         maxAttempts: 0
     )

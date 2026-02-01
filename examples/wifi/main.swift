@@ -4,7 +4,7 @@
 public func arduino_swift_main() {
     print("swift boot\n")
 
-    let w = WiFiSTA(ssid: "Sore", pass: "atendimento12")
+    let w = WiFiSTA(ssid: "*", pass: "*")
         .onConnect { info in
             print("wifi: connected\n")
             print("ssid: "); println(info.ssid)
