@@ -1,10 +1,32 @@
-// HTTPServer.swift
-// Minimal HTTP/1.1 server (tick-based) for Embedded Swift (no Foundation)
+//
+//  HTTPServer.swift
+//  ArduinoSwift - Minimal HTTP Server (UNO R4 WiFi)
+//
+//  Minimal HTTP/1.1 server (tick-based) for Embedded Swift (no Foundation)
+//
+//  Supports 2 styles of handlers:
+//    1) Sync:  (HTTPRequest) -> HTTPResponse
+//    2) Async: (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
+//
+//  Async design notes:
+//  - Still "one request per connection" and "Connection: close"
+//  - When an async route is matched, the server keeps the client open and
+//    keeps ticking until the completion is called or timeout occurs.
+//  - While an async response is pending, no new request is processed.
+//
 
 public final class HTTPServer: ArduinoTickable {
 
-    public typealias Handler = (HTTPRequest) -> HTTPResponse
+    // MARK: - Public types
+
+    public typealias SyncHandler  = (HTTPRequest) -> HTTPResponse
+    public typealias AsyncHandler = (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
     public typealias FailureHandler = (HTTPServerError) -> Void
+
+    public enum RouteHandler {
+        case sync(SyncHandler)
+        case async(AsyncHandler)
+    }
 
     // NOTE:
     // Route is intentionally NOT Sendable to avoid Swift 6 closure-sendability rules
@@ -12,9 +34,9 @@ public final class HTTPServer: ArduinoTickable {
     public struct Route {
         public let method: HTTPMethod
         public let path: [U8]
-        public let handler: Handler
+        public let handler: RouteHandler
 
-        public init(method: HTTPMethod, path: [U8], handler: @escaping Handler) {
+        public init(method: HTTPMethod, path: [U8], handler: RouteHandler) {
             self.method = method
             self.path = path
             self.handler = handler
@@ -25,6 +47,8 @@ public final class HTTPServer: ArduinoTickable {
         public let message: String
         public init(_ message: String) { self.message = message }
     }
+
+    // MARK: - Private state
 
     private var routes: [Route] = []
     private var failure: FailureHandler?
@@ -44,18 +68,36 @@ public final class HTTPServer: ArduinoTickable {
     private var nextPollAt: U32 = 0
     private var bodyWaitStart: U32 = 0
 
+    // Async pending response
+    private var pendingAsync: Bool = false
+    private var pendingAsyncStartedAt: U32 = 0
+    private var pendingResponse: HTTPResponse? = nil
+    private let asyncWaitMs: U32 = 8000
+
     public init() {}
+
+    // MARK: - Public API
 
     public func onFailure(_ cb: @escaping FailureHandler) {
         self.failure = cb
     }
 
-    public func get(_ path: String, _ handler: @escaping Handler) {
-        routes.append(.init(method: .get, path: Array(path.utf8), handler: handler))
+    // Sync routes
+    public func get(_ path: String, _ handler: @escaping SyncHandler) {
+        routes.append(.init(method: .get, path: Array(path.utf8), handler: .sync(handler)))
     }
 
-    public func post(_ path: String, _ handler: @escaping Handler) {
-        routes.append(.init(method: .post, path: Array(path.utf8), handler: handler))
+    public func post(_ path: String, _ handler: @escaping SyncHandler) {
+        routes.append(.init(method: .post, path: Array(path.utf8), handler: .sync(handler)))
+    }
+
+    // Async routes
+    public func get(_ path: String, _ handler: @escaping AsyncHandler) {
+        routes.append(.init(method: .get, path: Array(path.utf8), handler: .async(handler)))
+    }
+
+    public func post(_ path: String, _ handler: @escaping AsyncHandler) {
+        routes.append(.init(method: .post, path: Array(path.utf8), handler: .async(handler)))
     }
 
     @discardableResult
@@ -69,6 +111,7 @@ public final class HTTPServer: ArduinoTickable {
         }
         running = true
         resetRx()
+        resetPending()
         return true
     }
 
@@ -76,9 +119,12 @@ public final class HTTPServer: ArduinoTickable {
         arduino_http_server_end()
         running = false
         resetRx()
+        resetPending()
     }
 
     public func addToRuntime() { ArduinoRuntime.add(self) }
+
+    // MARK: - Tick
 
     public func tick() {
         if !running { return }
@@ -87,6 +133,29 @@ public final class HTTPServer: ArduinoTickable {
         if now < nextPollAt { return }
         nextPollAt = now &+ pollMs
 
+        // 1) If we are waiting for an async completion, do NOT parse a new request.
+        if pendingAsync {
+            if let resp = pendingResponse {
+                writeResponse(resp)
+                arduino_http_server_client_stop()
+                resetRx()
+                resetPending()
+                return
+            }
+
+            // still waiting - timeout?
+            if (now &- pendingAsyncStartedAt) > asyncWaitMs {
+                failure?(.init("Async response timeout"))
+                // Best-effort error response
+                writeResponse(.response("Async timeout\n", status: 504, contentType: "text/plain; charset=utf-8"))
+                arduino_http_server_client_stop()
+                resetRx()
+                resetPending()
+            }
+            return
+        }
+
+        // 2) No pending async: proceed normally.
         if arduino_http_server_client_available() != 1 {
             return
         }
@@ -122,10 +191,37 @@ public final class HTTPServer: ArduinoTickable {
             return
         }
 
-        let resp = route(req) ?? .response("Not Found\n", status: 404, contentType: "text/plain; charset=utf-8")
-        writeResponse(resp)
-        arduino_http_server_client_stop()
-        resetRx()
+        guard let match = findRoute(req) else {
+            writeResponse(.response("Not Found\n", status: 404, contentType: "text/plain; charset=utf-8"))
+            arduino_http_server_client_stop()
+            resetRx()
+            return
+        }
+
+        switch match.handler {
+        case .sync(let h):
+            let resp = h(req)
+            writeResponse(resp)
+            arduino_http_server_client_stop()
+            resetRx()
+
+        case .async(let h):
+            // Keep the connection open. We'll close it when completion is called or timeout.
+            pendingAsync = true
+            pendingAsyncStartedAt = arduino_millis()
+            pendingResponse = nil
+
+            // Important: clear rx for potential safety (we won't parse a new request anyway)
+            // but we keep it to preserve state if you want debugging later.
+            // resetRx() here would drop state; not strictly needed, but keeps memory low:
+            resetRx()
+
+            h(req) { resp in
+                self.writeResponse(resp)
+                arduino_http_server_client_stop()
+                self.resetRx()
+            }
+        }
     }
 
     // MARK: - Internals
@@ -137,16 +233,23 @@ public final class HTTPServer: ArduinoTickable {
         bodyWaitStart = 0
     }
 
+    private func resetPending() {
+        pendingAsync = false
+        pendingAsyncStartedAt = 0
+        pendingResponse = nil
+    }
+
     private func failAndClose(_ msg: String) {
         failure?(.init(msg))
         arduino_http_server_client_stop()
         resetRx()
+        resetPending()
     }
 
-    private func route(_ req: HTTPRequest) -> HTTPResponse? {
+    private func findRoute(_ req: HTTPRequest) -> Route? {
         for r in routes {
             if r.method == req.method && r.path == req.path {
-                return r.handler(req)
+                return r
             }
         }
         return nil
@@ -230,6 +333,7 @@ private func statusReason(_ status: I32) -> [U8] {
     case 405: return Array("Method Not Allowed".utf8)
     case 413: return Array("Payload Too Large".utf8)
     case 500: return Array("Internal Server Error".utf8)
+    case 504: return Array("Gateway Timeout".utf8)
     default:  return Array("OK".utf8)
     }
 }

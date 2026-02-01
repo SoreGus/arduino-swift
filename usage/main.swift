@@ -78,6 +78,20 @@ public func arduino_swift_main() {
         )
     }
 
+    server.post("/json") { request, responseCompletion in
+        someObject.completionHandler { value in
+            responseCompletion(
+                .json(
+                    .object([
+                        ("ok", .bool(true)),
+                        ("value", .number(123)),
+                        ("msg", .string("hello"))
+                    ])
+                )
+            )
+        }
+    }
+
     server.post("/send") { req in
         guard let j = req.jsonBody() else {
             return .json(.object([
@@ -92,8 +106,32 @@ public func arduino_swift_main() {
         ]))
     }
 
+    server.post("/json_completion") { req, respond in
+        someObject.completionHandler { value in
+            respond(
+                .json(
+                    .object([
+                        ("ok", .bool(true)),
+                        ("value", .number(123)),
+                        ("msg", .string("hello")),
+                        ("got", .string(value))
+                    ])
+                )
+            )
+        }
+    }
+
     _ = server.start(port: 80)
     ArduinoRuntime.add(server)
 
     ArduinoRuntime.keepAlive()
 }
+
+final class SomeObject {
+    func completionHandler(_ cb: @escaping (String) -> Void) {
+        delay(5000)
+        cb("ok")
+    }
+}
+
+let someObject = SomeObject()
