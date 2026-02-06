@@ -13,29 +13,33 @@ public final class AnalogPIN {
         AnalogPIN.ensureConfigured(resolutionBits: resolutionBits)
     }
 
+    @inline(__always)
     private static func ensureConfigured(resolutionBits: U32) {
         if configured { return }
         configured = true
 
-        // If a board ignores this, it's fine.
+        // If the board ignores this setting, it's still safe.
         arduino_analogReadResolution(resolutionBits)
         maxValueCache = arduino_analogMaxValue()
     }
 
+    @inline(__always)
     public func value() -> U32 {
         arduino_analogRead(number)
     }
 
+    @inline(__always)
     public func maxValue() -> U32 {
         AnalogPIN.maxValueCache
     }
 
     /// Returns a normalized value in [0.0, 1.0].
+    @inline(__always)
     public func normalized() -> Double {
-        let v = Double(value())
         let m = Double(maxValue())
-        if m <= 0 { return 0.0 }
-        let n = v / m
+        if m <= 0.0 { return 0.0 }
+
+        let n = Double(value()) / m
         if n < 0.0 { return 0.0 }
         if n > 1.0 { return 1.0 }
         return n

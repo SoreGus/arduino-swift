@@ -83,8 +83,7 @@ public enum wifi {
         if n >= UInt32(cap) { return nil }
 
         let slice = buf.prefix(Int(n))
-
-        // lossy decode: never nil, avoids crash
+        // Lossy decode: deterministic and never crashes on invalid UTF-8.
         return String(decoding: slice, as: UTF8.self)
     }
 
@@ -208,6 +207,10 @@ public enum wifi {
         return results
     }
 
+    // ------------------------------------------------------------
+    // MARK: - Raw IPv4
+    // ------------------------------------------------------------
+
     @inline(__always)
     public static func localIpRaw() -> ip4? {
         var out: [U8] = [0, 0, 0, 0] // fixed 4 bytes
@@ -222,9 +225,7 @@ public enum wifi {
     // This avoids C string writers and UTF-8 decoding pitfalls.
     @inline(__always)
     public static func localIpString() -> String {
-        let ip = localIpRaw()
-        if ip == nil { return "0.0.0.0" }
-        let v = ip!
+        guard let v = localIpRaw() else { return "0.0.0.0" }
         // Small, deterministic formatting.
         return "\(v.a).\(v.b).\(v.c).\(v.d)"
     }

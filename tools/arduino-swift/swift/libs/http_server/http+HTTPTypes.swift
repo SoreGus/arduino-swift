@@ -9,6 +9,11 @@ public enum HTTPMethod: U8, Sendable {
 public struct HTTPHeader: Sendable {
     public let name: [U8]
     public let value: [U8]
+
+    public init(name: [U8], value: [U8]) {
+        self.name = name
+        self.value = value
+    }
 }
 
 public struct HTTPRequest: Sendable {
@@ -16,6 +21,13 @@ public struct HTTPRequest: Sendable {
     public let path: [U8]
     public let headers: [HTTPHeader]
     public let body: [U8]
+
+    public init(method: HTTPMethod, path: [U8], headers: [HTTPHeader], body: [U8]) {
+        self.method = method
+        self.path = path
+        self.headers = headers
+        self.body = body
+    }
 
     public func pathString() -> String { ASCII.stringFromBytes(path) }
 
@@ -37,7 +49,7 @@ public struct HTTPRequest: Sendable {
 }
 
 // ============================================================
-// Request JSON helpers (no Foundation)
+// Request JSON helpers (using Essentials JSON)
 // ============================================================
 
 public extension HTTPRequest {
@@ -50,9 +62,11 @@ public extension HTTPRequest {
     }
 
     /// Parse the request body as JSON only if Content-Type is application/json.
-    func jsonBody() -> JSONValue? {
+    /// Uses Essentials JSON stack.
+    func jsonBody() -> EssentialsJSONValue? {
         guard isJSON() else { return nil }
-        return JSONParser.parse(body)
+        let ser = EssentialsJSONSerialization()
+        return try? ser.jsonObject(with: Data(body))
     }
 }
 
@@ -60,6 +74,12 @@ public struct HTTPResponse: Sendable {
     public let status: I32
     public let contentType: [U8]
     public let body: [U8]
+
+    public init(status: I32, contentType: [U8], body: [U8]) {
+        self.status = status
+        self.contentType = contentType
+        self.body = body
+    }
 
     public static func response(
         _ text: String,
@@ -77,11 +97,11 @@ public struct HTTPResponse: Sendable {
         .init(status: status, contentType: Array(contentType.utf8), body: data)
     }
 
-    public static func json(_ v: JSONValue, status: I32 = 200) -> HTTPResponse {
+    public static func json(_ v: EssentialsJSONValue, status: I32 = 200) -> HTTPResponse {
         .init(
             status: status,
             contentType: Array("application/json; charset=utf-8".utf8),
-            body: v.encodeUTF8()
+            body: EssentialsJSONSerialization.data(from: v).toArray()
         )
     }
 }

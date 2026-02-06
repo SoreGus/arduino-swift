@@ -88,9 +88,10 @@ public enum I2C {
             return bytes[i]
         }
 
-        /// Try decode bytes as UTF-8 String (returns nil if invalid UTF-8)
+        /// Decode as byte->String using shared ASCII helper from Essentials/core.
+        /// (Deliberately avoids heavier Unicode validation path in Embedded.)
         public func asUTF8String() -> String? {
-            String(validating: bytes, as: UTF8.self)
+            ASCII.stringFromBytes(bytes)
         }
 
         /// Interpret first 4 bytes as LE UInt32

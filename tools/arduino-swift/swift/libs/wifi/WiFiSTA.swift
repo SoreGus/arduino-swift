@@ -1,4 +1,11 @@
-// WiFiSTA.swift (safe adjustments)
+// WiFiSTA.swift
+// ArduinoSwift - WiFi STA helper (tickable)
+//
+// Safe adjustments applied:
+// - Clamp timing setters/callback intervals to avoid 0ms busy loops.
+// - Keep connect/disconnect edge behavior stable.
+// - Warmup before reading SSID/IP.
+// - Optional reconnect helper.
 
 public final class WiFiSTA: ArduinoTickable {
     public struct Info: Sendable {
@@ -32,22 +39,50 @@ public final class WiFiSTA: ArduinoTickable {
         self.ssid = ssid
         self.pass = pass
         _ = wifi.staBegin(ssid: ssid, pass: pass)
+        self.lastStatus = wifi.getStatus()
+        if self.lastStatus.isConnected {
+            self.connectedAtMs = arduino_millis()
+        }
     }
 
     @discardableResult
-    public func onConnect(_ block: @escaping (Info) -> Void) -> Self { onConnectBlock = block; return self }
+    public func onConnect(_ block: @escaping (Info) -> Void) -> Self {
+        onConnectBlock = block
+        return self
+    }
 
     @discardableResult
-    public func onDisconnect(_ block: @escaping (Int32) -> Void) -> Self { onDisconnectBlock = block; return self }
+    public func onDisconnect(_ block: @escaping (Int32) -> Void) -> Self {
+        onDisconnectBlock = block
+        return self
+    }
 
     @discardableResult
     public func onReport(everyMs: U32 = 3000, _ block: @escaping (Info) -> Void) -> Self {
-        reportEveryMs = everyMs
+        reportEveryMs = (everyMs == 0 ? 1 : everyMs)
         onReportBlock = block
         return self
     }
 
+    // Optional tuners
+    public func setPollEvery(ms: U32) {
+        pollEveryMs = (ms == 0 ? 1 : ms)
+    }
+
+    public func setConnectWarmup(ms: U32) {
+        connectWarmupMs = ms
+    }
+
     public func addToRuntime() { ArduinoRuntime.add(self) }
+
+    // Optional manual reconnect (same credentials)
+    public func reconnect() {
+        wifi.disconnect()
+        _ = wifi.staBegin(ssid: ssid, pass: pass)
+        didFireConnect = false
+        lastReportMs = 0
+        connectedAtMs = 0
+    }
 
     public func tick() {
         let now = arduino_millis()
@@ -70,7 +105,6 @@ public final class WiFiSTA: ArduinoTickable {
         }
 
         lastStatus = st
-
         if !st.isConnected { return }
 
         // Wait warmup before reading String values (SSID/IP)
@@ -83,11 +117,9 @@ public final class WiFiSTA: ArduinoTickable {
         }
 
         // periodic report
-        if let onReportBlock {
-            if (now &- lastReportMs) >= reportEveryMs {
-                lastReportMs = now
-                onReportBlock(readInfo(rawStatus: st.rawValue))
-            }
+        if let onReportBlock, (now &- lastReportMs) >= reportEveryMs {
+            lastReportMs = now
+            onReportBlock(readInfo(rawStatus: st.rawValue))
         }
     }
 
