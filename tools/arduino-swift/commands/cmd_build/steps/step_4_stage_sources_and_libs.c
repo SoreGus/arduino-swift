@@ -140,6 +140,32 @@ static int list_headers(const char* dir, char* out, size_t out_cap) {
     return 1;
 }
 
+static int list_first_level_dirs(const char* dir, char* out, size_t out_cap) {
+    if (!dir || !dir[0]) return 0;
+    out[0] = 0;
+    return fs_find_list(dir, "-mindepth 1 -maxdepth 1 -type d", out, out_cap);
+}
+
+static int should_skip_swift_top_dir(const char* name) {
+    if (!name || !name[0]) return 1;
+    if (name[0] == '.') return 1; // hidden
+
+    // reserved dirs
+    if (str_ieq(name, "core")) return 1;
+    if (str_ieq(name, "libs")) return 1;
+
+    // optional non-runtime dirs
+    if (str_ieq(name, "test")) return 1;
+    if (str_ieq(name, "tests")) return 1;
+    if (str_ieq(name, "example")) return 1;
+    if (str_ieq(name, "examples")) return 1;
+    if (str_ieq(name, "doc")) return 1;
+    if (str_ieq(name, "docs")) return 1;
+    if (str_ieq(name, "build")) return 1;
+
+    return 0;
+}
+
 // ------------------------------------------------------------
 // Path derivation: ctx->runtime_arduino currently points to ".../arduino/commom"
 // but Arduino-side libs live at ".../arduino/libs". So we derive the parent.
@@ -396,8 +422,72 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
     }
     append_swift_list_as_args(core_list, ctx->swift_args, sizeof(ctx->swift_args));
 
+    // --------------------------------------------------
+    // 1.1) Auto-include any extra top-level Swift dirs
+    //      under runtime_swift (e.g. swift/essentials).
+    //      Excludes: core, libs, hidden, tests/docs/examples/build.
+    // --------------------------------------------------
+    {
+        char top_dirs[65535];
+        top_dirs[0] = 0;
+
+        if (!list_first_level_dirs(ctx->runtime_swift, top_dirs, sizeof(top_dirs))) {
+            log_warn("Failed listing top-level Swift directories in: %s", ctx->runtime_swift);
+        } else if (top_dirs[0]) {
+            char* tmp = (char*)malloc(strlen(top_dirs) + 1);
+            if (!tmp) die("OOM");
+            strcpy(tmp, top_dirs);
+
+            char* p = tmp;
+            while (*p) {
+                char* e = strchr(p, '\n');
+                if (e) *e = 0;
+
+                if (p[0]) {
+                    const char* leaf = path_basename(p);
+                    if (!should_skip_swift_top_dir(leaf)) {
+                        char dirpath[1024];
+                        if (!path_join(dirpath, sizeof(dirpath), ctx->runtime_swift, leaf)) {
+                            log_warn("Path overflow joining runtime_swift and %s", leaf);
+                        } else if (dir_exists(dirpath)) {
+                            char list[65535];
+                            list[0] = 0;
+                            if (fs_find_list(dirpath, "-type f -name \"*.swift\"", list, sizeof(list)) && list[0]) {
+                                log_info("Adding Swift system dir: %s", leaf);
+                                append_swift_list_as_args(list, ctx->swift_args, sizeof(ctx->swift_args));
+
+                                // Stage bridge C/C++ from system dir too
+                                char dst_libdir[1024];
+                                snprintf(dst_libdir, sizeof(dst_libdir), "%s/libraries/%s", ctx->sketch_dir, leaf);
+                                mkdir_p(dst_libdir);
+
+                                if (!fs_copy_c_cpp_h_recursive(dirpath, dst_libdir)) {
+                                    log_error("Failed to copy Swift system dir C/C++ from %s", dirpath);
+                                    free(tmp);
+                                    return 0;
+                                }
+
+                                normalize_arduino_lib_layout(dst_libdir);
+                                ensure_arduino_library_properties(dst_libdir, leaf);
+
+                                // Guarantee compile/link:
+                                generate_shim_headers_for_lib(ctx->sketch_dir, leaf);
+                                promote_bridge_sources_to_sketch_root(ctx->sketch_dir, leaf);
+                            }
+                        }
+                    }
+                }
+
+                if (!e) break;
+                p = e + 1;
+            }
+
+            free(tmp);
+        }
+    }
+
     if (ctx->swift_lib_count > 0) log_info("Including %d Swift lib(s)", ctx->swift_lib_count);
-    else                         log_info("No Swift libs specified -> core only");
+    else                         log_info("No Swift libs specified -> core + auto system dirs only");
 
     // --------------------------------------------------
     // 2) Swift libs + optional Arduino libs
