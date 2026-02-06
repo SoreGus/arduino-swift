@@ -26,9 +26,7 @@ FIND ?= find
 
 # ---- Sources ----
 ROOT_SRCS := \
-  main.c \
-  util.c \
-  jsonlite.c
+  main.c 
 
 CMD_SRCS := $(shell $(FIND) commands -type f -name '*.c' 2>/dev/null | sort)
 
