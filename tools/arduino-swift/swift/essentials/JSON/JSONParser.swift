@@ -1,221 +1,237 @@
-struct JSONParser {
-    private let bytes: [Byte]
+struct EssentialsJSONParser {
+    private var bytes: [UInt8]
     private var i: Int = 0
 
-    init(_ bytes: [Byte]) {
+    init(bytes: [UInt8]) {
         self.bytes = bytes
     }
 
-    mutating func parse() throws -> JSONValue {
-        skipWhitespace()
-        let value = try parseValue()
-        skipWhitespace()
-        guard i == bytes.count else { throw EssentialsError.invalidJSON }
-        return value
+    mutating func parse() -> (EssentialsJSONValue?, EssentialsError) {
+        skipWS()
+        let (v, e) = parseValue()
+        if e != .none { return (nil, e) }
+        skipWS()
+        if i != bytes.count { return (nil, .invalidJSON) }
+        return (v, .none)
     }
 
-    private mutating func parseValue() throws -> JSONValue {
-        guard let b = peek() else { throw EssentialsError.invalidJSON }
+    private mutating func parseValue() -> (EssentialsJSONValue?, EssentialsError) {
+        guard let b = peek() else { return (nil, .unexpectedEOF) }
 
         switch b {
-        case ASCII.quote:
-            return .string(try parseString())
-        case ASCII.lbrace:
-            return .object(try parseObject())
-        case ASCII.lbracket:
-            return .array(try parseArray())
-        case Byte(ascii: "t"):
-            try expectKeyword("true"); return .bool(true)
-        case Byte(ascii: "f"):
-            try expectKeyword("false"); return .bool(false)
-        case Byte(ascii: "n"):
-            try expectKeyword("null"); return .null
-        case Byte(ascii: "-"), Byte(ascii: "0")...Byte(ascii: "9"):
-            return .number(try parseNumber())
+        case 0x7B:
+            let (obj, e) = parseObject()
+            if e != .none { return (nil, e) }
+            return (EssentialsJSONValue.object(obj ?? []), .none)
+
+        case 0x5B:
+            let (arr, e) = parseArray()
+            if e != .none { return (nil, e) }
+            return (.array(arr ?? []), .none)
+
+        case 0x22:
+            let (s, e) = parseString()
+            if e != .none { return (nil, e) }
+            return (.string(s ?? ""), .none)
+
+        case 0x74:
+            let e = expectKeyword([0x74,0x72,0x75,0x65]) // true
+            return e == .none ? (.bool(true), .none) : (nil, e)
+
+        case 0x66:
+            let e = expectKeyword([0x66,0x61,0x6C,0x73,0x65]) // false
+            return e == .none ? (.bool(false), .none) : (nil, e)
+
+        case 0x6E:
+            let e = expectKeyword([0x6E,0x75,0x6C,0x6C]) // null
+            return e == .none ? (.null, .none) : (nil, e)
+
         default:
-            throw EssentialsError.invalidJSON
+            let (n, e) = parseNumber()
+            if e != .none { return (nil, e) }
+            return (.number(n ?? 0), .none)
         }
     }
 
-    private mutating func parseObject() throws -> [(String, JSONValue)] {
-        try consume(ASCII.lbrace)
-        skipWhitespace()
+    private mutating func parseObject() -> ([(String, EssentialsJSONValue)]?, EssentialsError) {
+        let c = consume(0x7B)
+        if c != .none { return (nil, c) } // {
+        skipWS()
 
-        var pairs: [(String, JSONValue)] = []
-
-        if peek() == ASCII.rbrace {
+        var items: [(String, EssentialsJSONValue)] = []
+        if peek() == 0x7D {
             _ = advance()
-            return pairs
+            return (items, .none)
         }
 
         while true {
-            skipWhitespace()
-            guard peek() == ASCII.quote else { throw EssentialsError.invalidJSON }
-            let key = try parseString()
+            skipWS()
+            let (k, ke) = parseString()
+            if ke != .none { return (nil, ke) }
+            skipWS()
 
-            skipWhitespace()
-            try consume(ASCII.colon)
-            skipWhitespace()
+            let ce = consume(0x3A)
+            if ce != .none { return (nil, ce) } // :
+            skipWS()
 
-            let value = try parseValue()
-            pairs.append((key, value))
+            let (v, ve) = parseValue()
+            if ve != .none { return (nil, ve) }
+            items.append((k ?? "", v ?? .null))
+            skipWS()
 
-            skipWhitespace()
-            if peek() == ASCII.comma {
-                _ = advance()
-                continue
-            } else if peek() == ASCII.rbrace {
-                _ = advance()
-                return pairs
-            } else {
-                throw EssentialsError.invalidJSON
-            }
+            guard let sep = advance() else { return (nil, .invalidJSON) }
+            if sep == 0x7D { break } // }
+            if sep != 0x2C { return (nil, .invalidJSON) } // ,
         }
+
+        return (items, .none)
     }
 
-    private mutating func parseArray() throws -> [JSONValue] {
-        try consume(ASCII.lbracket)
-        skipWhitespace()
+    private mutating func parseArray() -> ([EssentialsJSONValue]?, EssentialsError) {
+        let c = consume(0x5B)
+        if c != .none { return (nil, c) } // [
+        skipWS()
 
-        var values: [JSONValue] = []
-
-        if peek() == ASCII.rbracket {
+        var arr: [EssentialsJSONValue] = []
+        if peek() == 0x5D {
             _ = advance()
-            return values
+            return (arr, .none)
         }
 
         while true {
-            values.append(try parseValue())
-            skipWhitespace()
+            skipWS()
+            let (v, e) = parseValue()
+            if e != .none { return (nil, e) }
+            arr.append(v ?? .null)
+            skipWS()
 
-            if peek() == ASCII.comma {
-                _ = advance()
-                skipWhitespace()
-            } else if peek() == ASCII.rbracket {
-                _ = advance()
-                return values
-            } else {
-                throw EssentialsError.invalidJSON
-            }
+            guard let sep = advance() else { return (nil, .invalidJSON) }
+            if sep == 0x5D { break } // ]
+            if sep != 0x2C { return (nil, .invalidJSON) } // ,
         }
+
+        return (arr, .none)
     }
 
-    private mutating func parseString() throws -> String {
-        try consume(ASCII.quote)
-        var out: [Byte] = []
+    private mutating func parseString() -> (String?, EssentialsError) {
+        let c = consume(0x22)
+        if c != .none { return (nil, c) } // "
 
+        var out: [UInt8] = []
         while let b = advance() {
-            if b == ASCII.quote {
-                guard let s = String(bytes: out, encoding: .utf8) else {
-                    throw EssentialsError.invalidUTF8
-                }
-                return s
+            if b == 0x22 {
+                return (String.fromASCIILossy(out), .none)
             }
 
-            if b == ASCII.backslash {
-                guard let esc = advance() else { throw EssentialsError.invalidJSON }
+            if b == 0x5C { // backslash
+                guard let esc = advance() else { return (nil, .unexpectedEOF) }
                 switch esc {
-                case Byte(ascii: "\""): out.append(Byte(ascii: "\""))
-                case Byte(ascii: "\\"): out.append(Byte(ascii: "\\"))
-                case Byte(ascii: "/"):  out.append(Byte(ascii: "/"))
-                case Byte(ascii: "b"):  out.append(0x08)
-                case Byte(ascii: "f"):  out.append(0x0C)
-                case Byte(ascii: "n"):  out.append(0x0A)
-                case Byte(ascii: "r"):  out.append(0x0D)
-                case Byte(ascii: "t"):  out.append(0x09)
-                case Byte(ascii: "u"):
-                    let scalar = try parseUnicodeScalar()
-                    out.append(contentsOf: String(scalar).utf8)
+                case 0x22: out.append(0x22) // "
+                case 0x5C: out.append(0x5C) // \
+                case 0x2F: out.append(0x2F) // /
+                case 0x62: out.append(0x08) // b
+                case 0x66: out.append(0x0C) // f
+                case 0x6E: out.append(0x0A) // n
+                case 0x72: out.append(0x0D) // r
+                case 0x74: out.append(0x09) // t
+                case 0x75:
+                    let e = consumeHex4()
+                    if e != .none { return (nil, e) }
+                    out.append(UInt8(ascii: "?")) // keep parser tiny
                 default:
-                    throw EssentialsError.invalidJSON
+                    return (nil, .unsupportedEscape)
                 }
             } else {
                 out.append(b)
             }
         }
 
-        throw EssentialsError.invalidJSON
+        return (nil, .unexpectedEOF)
     }
 
-    private mutating func parseUnicodeScalar() throws -> Unicode.Scalar {
-        let h1 = try readHexNibble()
-        let h2 = try readHexNibble()
-        let h3 = try readHexNibble()
-        let h4 = try readHexNibble()
-        let value = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4
-        guard let scalar = Unicode.Scalar(value) else { throw EssentialsError.invalidJSON }
-        return scalar
-    }
-
-    private mutating func parseNumber() throws -> Double {
+    private mutating func parseNumber() -> (Double?, EssentialsError) {
         let start = i
 
-        if peek() == Byte(ascii: "-") { _ = advance() }
+        if peek() == 0x2D { _ = advance() } // -
 
-        guard let first = peek() else { throw EssentialsError.invalidJSON }
-        if first == Byte(ascii: "0") {
+        guard let first = peek() else { return (nil, .invalidNumber) }
+
+        if first == 0x30 {
             _ = advance()
-        } else if first >= Byte(ascii: "1"), first <= Byte(ascii: "9") {
-            while let b = peek(), b >= Byte(ascii: "0"), b <= Byte(ascii: "9") { _ = advance() }
         } else {
-            throw EssentialsError.invalidJSON
+            guard isDigit(first) else { return (nil, .invalidJSON) }
+            while let d = peek(), isDigit(d) { _ = advance() }
         }
 
-        if peek() == Byte(ascii: ".") {
+        if peek() == 0x2E {
             _ = advance()
-            guard let b = peek(), b >= Byte(ascii: "0"), b <= Byte(ascii: "9") else { throw EssentialsError.invalidJSON }
-            while let b = peek(), b >= Byte(ascii: "0"), b <= Byte(ascii: "9") { _ = advance() }
+            guard let d = peek(), isDigit(d) else { return (nil, .invalidNumber) }
+            while let d2 = peek(), isDigit(d2) { _ = advance() }
         }
 
-        if let b = peek(), b == Byte(ascii: "e") || b == Byte(ascii: "E") {
+        if let e = peek(), (e == 0x65 || e == 0x45) {
             _ = advance()
-            if let sign = peek(), sign == Byte(ascii: "+") || sign == Byte(ascii: "-") { _ = advance() }
-            guard let d = peek(), d >= Byte(ascii: "0"), d <= Byte(ascii: "9") else { throw EssentialsError.invalidJSON }
-            while let d = peek(), d >= Byte(ascii: "0"), d <= Byte(ascii: "9") { _ = advance() }
+            if let s = peek(), (s == 0x2B || s == 0x2D) { _ = advance() }
+            guard let d = peek(), isDigit(d) else { return (nil, .invalidNumber) }
+            while let d2 = peek(), isDigit(d2) { _ = advance() }
         }
 
-        let raw = Array(bytes[start..<i])
-        guard let text = String(bytes: raw, encoding: .utf8), let number = Double(text) else {
-            throw EssentialsError.invalidNumber
-        }
-        return number
+        let token = Array(bytes[start..<i])
+        let text = String.fromASCIILossy(token)
+        guard let number = Double(text) else { return (nil, .invalidNumber) }
+        return (number, .none)
     }
 
-    private mutating func skipWhitespace() {
-        while let b = peek(), b == ASCII.space || b == ASCII.tab || b == ASCII.lf || b == ASCII.cr {
-            _ = advance()
-        }
-    }
-
-    private func peek() -> Byte? {
-        guard i < bytes.count else { return nil }
+    @inline(__always) private func peek() -> UInt8? {
+        if i < 0 || i >= bytes.count { return nil }
         return bytes[i]
     }
 
-    @discardableResult
-    private mutating func advance() -> Byte? {
-        guard i < bytes.count else { return nil }
-        defer { i += 1 }
-        return bytes[i]
+    @inline(__always) private mutating func advance() -> UInt8? {
+        if i < 0 || i >= bytes.count { return nil }
+        let b = bytes[i]
+        i += 1
+        return b
     }
 
-    private mutating func consume(_ expected: Byte) throws {
-        guard let b = advance(), b == expected else { throw EssentialsError.invalidJSON }
-    }
-
-    private mutating func expectKeyword(_ keyword: String) throws {
-        for b in keyword.utf8 {
-            guard advance() == b else { throw EssentialsError.invalidJSON }
+    @inline(__always) private mutating func skipWS() {
+        while let b = peek() {
+            if b == 0x20 || b == 0x0A || b == 0x0D || b == 0x09 {
+                _ = advance()
+            } else {
+                break
+            }
         }
     }
 
-    private mutating func readHexNibble() throws -> UInt32 {
-        guard let b = advance() else { throw EssentialsError.invalidJSON }
-        switch b {
-        case Byte(ascii: "0")...Byte(ascii: "9"): return UInt32(b - Byte(ascii: "0"))
-        case Byte(ascii: "a")...Byte(ascii: "f"): return UInt32(10 + b - Byte(ascii: "a"))
-        case Byte(ascii: "A")...Byte(ascii: "F"): return UInt32(10 + b - Byte(ascii: "A"))
-        default: throw EssentialsError.invalidJSON
+    private mutating func consume(_ expected: UInt8) -> EssentialsError {
+        guard advance() == expected else { return .invalidJSON }
+        return .none
+    }
+
+    private mutating func expectKeyword(_ kw: [UInt8]) -> EssentialsError {
+        var j = 0
+        while j < kw.count {
+            guard advance() == kw[j] else { return .invalidJSON }
+            j += 1
         }
+        return .none
+    }
+
+    private mutating func consumeHex4() -> EssentialsError {
+        var c = 0
+        while c < 4 {
+            guard let b = advance(), isHex(b) else { return .invalidJSON }
+            c += 1
+        }
+        return .none
+    }
+
+    @inline(__always) private func isDigit(_ b: UInt8) -> Bool {
+        b >= 0x30 && b <= 0x39
+    }
+
+    @inline(__always) private func isHex(_ b: UInt8) -> Bool {
+        (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66)
     }
 }

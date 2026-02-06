@@ -1,4 +1,4 @@
-public enum Endian: Sendable {
+public enum Endianness {
     case little
     case big
 }

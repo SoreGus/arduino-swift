@@ -1,4 +1,4 @@
-// ASCII.swift — tiny ASCII helpers (Embedded-safe)
+// ASCII_core.swift — tiny ASCII helpers (Embedded-safe)
 
 @inline(__always)
 public func asciiBytes(_ s: StaticString) -> [UInt8] {
