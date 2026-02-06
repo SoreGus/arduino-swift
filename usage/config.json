@@ -1,5 +1,5 @@
 {
-  "board": "R4WIFI",
-  "lib": ["wifis3", "http_server", "Button"],
+  "board": "Pico",
+  "lib": ["Button"],
   "arduino_lib": []
 }

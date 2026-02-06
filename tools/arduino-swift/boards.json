@@ -37,5 +37,12 @@
       "split": "100_0",
       "security": "none"
     }
+  },
+  "Pico": {
+    "fqbn": "rp2040:rp2040:rpipico",
+    "core": "rp2040:rp2040",
+    "api": "pico_rp2040",
+    "swift_target": "armv6m-none-none-eabi",
+    "cpu": "cortex-m0plus"
   }
 }
