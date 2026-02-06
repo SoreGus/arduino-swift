@@ -9,17 +9,16 @@
 //    2) Async: (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
 //
 //  Async design notes:
-//  - Still "one request per connection" and "Connection: close"
-//  - When an async route is matched, the server keeps the client open and
-//    keeps ticking until the completion is called or timeout occurs.
-//  - While an async response is pending, no new request is processed.
+//  - One request per connection, Connection: close
+//  - While async is pending, new requests are not processed
+//  - Async callback only stores pending response; write/close happens in tick()
 //
 
 public final class HTTPServer: ArduinoTickable {
 
     // MARK: - Public types
 
-    public typealias SyncHandler  = (HTTPRequest) -> HTTPResponse
+    public typealias SyncHandler = (HTTPRequest) -> HTTPResponse
     public typealias AsyncHandler = (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
     public typealias FailureHandler = (HTTPServerError) -> Void
 
@@ -28,9 +27,6 @@ public final class HTTPServer: ArduinoTickable {
         case async(AsyncHandler)
     }
 
-    // NOTE:
-    // Route is intentionally NOT Sendable to avoid Swift 6 closure-sendability rules
-    // for stored closures in Sendable types.
     public struct Route {
         public let method: HTTPMethod
         public let path: [U8]
@@ -48,6 +44,28 @@ public final class HTTPServer: ArduinoTickable {
         public init(_ message: String) { self.message = message }
     }
 
+    public struct Limits: Sendable {
+        public var headerMaxBytes: Int
+        public var bodyMaxBytes: Int
+        public var bodyWaitMs: U32
+        public var asyncWaitMs: U32
+        public var pollMs: U32
+
+        public init(
+            headerMaxBytes: Int = 2048,
+            bodyMaxBytes: Int = 2048,
+            bodyWaitMs: U32 = 8000,
+            asyncWaitMs: U32 = 8000,
+            pollMs: U32 = 5
+        ) {
+            self.headerMaxBytes = headerMaxBytes
+            self.bodyMaxBytes = bodyMaxBytes
+            self.bodyWaitMs = bodyWaitMs
+            self.asyncWaitMs = asyncWaitMs
+            self.pollMs = pollMs
+        }
+    }
+
     // MARK: - Private state
 
     private var routes: [Route] = []
@@ -60,10 +78,12 @@ public final class HTTPServer: ArduinoTickable {
     private var headerEndIndex: Int = -1
     private var expectedBodyLen: Int = 0
 
-    private let headerMaxBytes: Int = 2048
-    private let bodyMaxBytes: Int = 2048
-    private let bodyWaitMs: U32 = 8000
-    private let pollMs: U32 = 5
+    // configurable
+    private var headerMaxBytes: Int = 2048
+    private var bodyMaxBytes: Int = 2048
+    private var bodyWaitMs: U32 = 8000
+    private var pollMs: U32 = 5
+    private var asyncWaitMs: U32 = 8000
 
     private var nextPollAt: U32 = 0
     private var bodyWaitStart: U32 = 0
@@ -72,11 +92,18 @@ public final class HTTPServer: ArduinoTickable {
     private var pendingAsync: Bool = false
     private var pendingAsyncStartedAt: U32 = 0
     private var pendingResponse: HTTPResponse? = nil
-    private let asyncWaitMs: U32 = 8000
 
     public init() {}
 
     // MARK: - Public API
+
+    public func configure(_ limits: Limits) {
+        headerMaxBytes = limits.headerMaxBytes < 256 ? 256 : limits.headerMaxBytes
+        bodyMaxBytes = limits.bodyMaxBytes < 0 ? 0 : limits.bodyMaxBytes
+        bodyWaitMs = limits.bodyWaitMs == 0 ? 1 : limits.bodyWaitMs
+        asyncWaitMs = limits.asyncWaitMs == 0 ? 1 : limits.asyncWaitMs
+        pollMs = limits.pollMs == 0 ? 1 : limits.pollMs
+    }
 
     public func onFailure(_ cb: @escaping FailureHandler) {
         self.failure = cb
@@ -122,7 +149,9 @@ public final class HTTPServer: ArduinoTickable {
         resetPending()
     }
 
-    public func addToRuntime() { ArduinoRuntime.add(self) }
+    public func addToRuntime() {
+        ArduinoRuntime.add(self)
+    }
 
     // MARK: - Tick
 
@@ -133,7 +162,7 @@ public final class HTTPServer: ArduinoTickable {
         if now < nextPollAt { return }
         nextPollAt = now &+ pollMs
 
-        // 1) If we are waiting for an async completion, do NOT parse a new request.
+        // 1) Waiting async completion
         if pendingAsync {
             if let resp = pendingResponse {
                 writeResponse(resp)
@@ -143,10 +172,8 @@ public final class HTTPServer: ArduinoTickable {
                 return
             }
 
-            // still waiting - timeout?
             if (now &- pendingAsyncStartedAt) > asyncWaitMs {
                 failure?(.init("Async response timeout"))
-                // Best-effort error response
                 writeResponse(.response("Async timeout\n", status: 504, contentType: "text/plain; charset=utf-8"))
                 arduino_http_server_client_stop()
                 resetRx()
@@ -155,7 +182,7 @@ public final class HTTPServer: ArduinoTickable {
             return
         }
 
-        // 2) No pending async: proceed normally.
+        // 2) Normal flow
         if arduino_http_server_client_available() != 1 {
             return
         }
@@ -164,6 +191,7 @@ public final class HTTPServer: ArduinoTickable {
 
         if headerEndIndex < 0 {
             headerEndIndex = findHeaderEnd(rx)
+
             if headerEndIndex >= 0 {
                 expectedBodyLen = parseContentLength(rx, headerEndIndex: headerEndIndex) ?? 0
                 if expectedBodyLen > bodyMaxBytes { expectedBodyLen = bodyMaxBytes }
@@ -206,20 +234,17 @@ public final class HTTPServer: ArduinoTickable {
             resetRx()
 
         case .async(let h):
-            // Keep the connection open. We'll close it when completion is called or timeout.
             pendingAsync = true
             pendingAsyncStartedAt = arduino_millis()
             pendingResponse = nil
 
-            // Important: clear rx for potential safety (we won't parse a new request anyway)
-            // but we keep it to preserve state if you want debugging later.
-            // resetRx() here would drop state; not strictly needed, but keeps memory low:
+            // optional: free request buffer memory while waiting
             resetRx()
 
             h(req) { resp in
-                self.writeResponse(resp)
-                arduino_http_server_client_stop()
-                self.resetRx()
+                // IMPORTANT:
+                // do not write/close here; only store response
+                self.pendingResponse = resp
             }
         }
     }
@@ -273,6 +298,7 @@ public final class HTTPServer: ArduinoTickable {
             }
 
             if n <= 0 { break }
+
             let nn = Int(n)
             if nn > 0 {
                 rx.append(contentsOf: tmp[0..<nn])
@@ -343,7 +369,7 @@ private func findHeaderEnd(_ bytes: [U8]) -> Int {
     if bytes.count < 4 { return -1 }
     var i = 3
     while i < bytes.count {
-        if bytes[i-3] == 13 && bytes[i-2] == 10 && bytes[i-1] == 13 && bytes[i] == 10 {
+        if bytes[i - 3] == 13 && bytes[i - 2] == 10 && bytes[i - 1] == 13 && bytes[i] == 10 {
             return i + 1
         }
         i += 1
@@ -381,7 +407,7 @@ private func parseRequest(_ bytes: [U8], headerEndIndex: Int, bodyLen: Int) -> H
 
     var cur = lineEnd + 2
     while cur + 2 <= header.count {
-        if cur + 1 < header.count, header[cur] == 13, header[cur+1] == 10 { break }
+        if cur + 1 < header.count, header[cur] == 13, header[cur + 1] == 10 { break }
 
         guard let hEnd = ASCII.findCRLF(header, start: cur) else { break }
         let line = Array(header[cur..<hEnd])
@@ -389,7 +415,7 @@ private func parseRequest(_ bytes: [U8], headerEndIndex: Int, bodyLen: Int) -> H
 
         guard let colon = ASCII.findByte(line, byte: 0x3A, start: 0) else { continue }
         let name = ASCII.rtrimSpaces(Array(line[0..<colon]))
-        let value = ASCII.ltrimSpaces(Array(line[(colon+1)..<line.count]))
+        let value = ASCII.ltrimSpaces(Array(line[(colon + 1)..<line.count]))
         headers.append(.init(name: name, value: value))
     }
 
@@ -414,7 +440,7 @@ private func parseContentLength(_ bytes: [U8], headerEndIndex: Int) -> Int? {
     let target = Array("Content-Length".utf8)
 
     while cur + 2 <= header.count {
-        if cur + 1 < header.count, header[cur] == 13, header[cur+1] == 10 { break }
+        if cur + 1 < header.count, header[cur] == 13, header[cur + 1] == 10 { break }
 
         guard let hEnd = ASCII.findCRLF(header, start: cur) else { break }
         let line = Array(header[cur..<hEnd])
@@ -425,7 +451,7 @@ private func parseContentLength(_ bytes: [U8], headerEndIndex: Int) -> Int? {
         let name = ASCII.rtrimSpaces(Array(line[0..<colon]))
         if !ASCII.caseInsensitiveEqual(name, target) { continue }
 
-        let value = ASCII.ltrimSpaces(Array(line[(colon+1)..<line.count]))
+        let value = ASCII.ltrimSpaces(Array(line[(colon + 1)..<line.count]))
         return ASCII.parseInt(value)
     }
 

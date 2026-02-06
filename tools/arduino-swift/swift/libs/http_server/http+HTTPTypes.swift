@@ -1,5 +1,5 @@
 // http+HTTPTypes.swift
-// HTTP request/response types (no Foundation)
+// HTTP request/response types (embedded-safe, no Foundation)
 
 public enum HTTPMethod: U8, Sendable {
     case get  = 1
@@ -31,7 +31,6 @@ public struct HTTPRequest: Sendable {
 
     public func pathString() -> String { ASCII.stringFromBytes(path) }
 
-    /// Case-insensitive ASCII header lookup (e.g. "Content-Length", "Content-Type")
     public func header(_ name: StaticString) -> [U8]? {
         let n = ASCII.staticUTF8(name)
         for h in headers {
@@ -48,25 +47,16 @@ public struct HTTPRequest: Sendable {
     }
 }
 
-// ============================================================
-// Request JSON helpers (using Essentials JSON)
-// ============================================================
-
 public extension HTTPRequest {
-
-    /// True when Content-Type begins with "application/json" (case-insensitive),
-    /// accepting suffixes like "; charset=utf-8".
     func isJSON() -> Bool {
         guard let ct = header("Content-Type") else { return false }
         return ASCII.hasPrefixCaseInsensitive(ct, Array("application/json".utf8))
     }
 
-    /// Parse the request body as JSON only if Content-Type is application/json.
-    /// Uses Essentials JSON stack.
     func jsonBody() -> EssentialsJSONValue? {
         guard isJSON() else { return nil }
-        let ser = EssentialsJSONSerialization()
-        return try? ser.jsonObject(with: Data(body))
+        let (v, e) = JSONSerialization().jsonObject(with: Data(body))
+        return e == .none ? v : nil
     }
 }
 
@@ -101,7 +91,7 @@ public struct HTTPResponse: Sendable {
         .init(
             status: status,
             contentType: Array("application/json; charset=utf-8".utf8),
-            body: EssentialsJSONSerialization.data(from: v).toArray()
+            body: JSONSerialization.data(from: v).toArray()
         )
     }
 }

@@ -1,3 +1,5 @@
+// JSONParser.swift
+
 struct EssentialsJSONParser {
     private var bytes: [UInt8]
     private var i: Int = 0
@@ -19,31 +21,31 @@ struct EssentialsJSONParser {
         guard let b = peek() else { return (nil, .unexpectedEOF) }
 
         switch b {
-        case 0x7B:
+        case 0x7B: // {
             let (obj, e) = parseObject()
             if e != .none { return (nil, e) }
-            return (EssentialsJSONValue.object(obj ?? []), .none)
+            return (.object(obj ?? []), .none)
 
-        case 0x5B:
+        case 0x5B: // [
             let (arr, e) = parseArray()
             if e != .none { return (nil, e) }
             return (.array(arr ?? []), .none)
 
-        case 0x22:
+        case 0x22: // "
             let (s, e) = parseString()
             if e != .none { return (nil, e) }
             return (.string(s ?? ""), .none)
 
-        case 0x74:
-            let e = expectKeyword([0x74,0x72,0x75,0x65]) // true
+        case 0x74: // true
+            let e = expectKeyword([0x74,0x72,0x75,0x65])
             return e == .none ? (.bool(true), .none) : (nil, e)
 
-        case 0x66:
-            let e = expectKeyword([0x66,0x61,0x6C,0x73,0x65]) // false
+        case 0x66: // false
+            let e = expectKeyword([0x66,0x61,0x6C,0x73,0x65])
             return e == .none ? (.bool(false), .none) : (nil, e)
 
-        case 0x6E:
-            let e = expectKeyword([0x6E,0x75,0x6C,0x6C]) // null
+        case 0x6E: // null
+            let e = expectKeyword([0x6E,0x75,0x6C,0x6C])
             return e == .none ? (.null, .none) : (nil, e)
 
         default:
@@ -54,12 +56,12 @@ struct EssentialsJSONParser {
     }
 
     private mutating func parseObject() -> ([(String, EssentialsJSONValue)]?, EssentialsError) {
-        let c = consume(0x7B)
-        if c != .none { return (nil, c) } // {
+        let c = consume(0x7B) // {
+        if c != .none { return (nil, c) }
         skipWS()
 
         var items: [(String, EssentialsJSONValue)] = []
-        if peek() == 0x7D {
+        if peek() == 0x7D { // }
             _ = advance()
             return (items, .none)
         }
@@ -70,8 +72,8 @@ struct EssentialsJSONParser {
             if ke != .none { return (nil, ke) }
             skipWS()
 
-            let ce = consume(0x3A)
-            if ce != .none { return (nil, ce) } // :
+            let ce = consume(0x3A) // :
+            if ce != .none { return (nil, ce) }
             skipWS()
 
             let (v, ve) = parseValue()
@@ -88,12 +90,12 @@ struct EssentialsJSONParser {
     }
 
     private mutating func parseArray() -> ([EssentialsJSONValue]?, EssentialsError) {
-        let c = consume(0x5B)
-        if c != .none { return (nil, c) } // [
+        let c = consume(0x5B) // [
+        if c != .none { return (nil, c) }
         skipWS()
 
         var arr: [EssentialsJSONValue] = []
-        if peek() == 0x5D {
+        if peek() == 0x5D { // ]
             _ = advance()
             return (arr, .none)
         }
@@ -114,16 +116,16 @@ struct EssentialsJSONParser {
     }
 
     private mutating func parseString() -> (String?, EssentialsError) {
-        let c = consume(0x22)
-        if c != .none { return (nil, c) } // "
+        let c = consume(0x22) // "
+        if c != .none { return (nil, c) }
 
         var out: [UInt8] = []
         while let b = advance() {
-            if b == 0x22 {
-                return (String.fromASCIILossy(out), .none)
+            if b == 0x22 { // "
+                return (String(decoding: out, as: UTF8.self), .none)
             }
 
-            if b == 0x5C { // backslash
+            if b == 0x5C { // \
                 guard let esc = advance() else { return (nil, .unexpectedEOF) }
                 switch esc {
                 case 0x22: out.append(0x22) // "
@@ -137,7 +139,7 @@ struct EssentialsJSONParser {
                 case 0x75:
                     let e = consumeHex4()
                     if e != .none { return (nil, e) }
-                    out.append(UInt8(ascii: "?")) // keep parser tiny
+                    out.append(UInt8(ascii: "?")) // tiny parser tradeoff
                 default:
                     return (nil, .unsupportedEscape)
                 }
@@ -177,7 +179,7 @@ struct EssentialsJSONParser {
         }
 
         let token = Array(bytes[start..<i])
-        let text = String.fromASCIILossy(token)
+        let text = String(decoding: token, as: UTF8.self)
         guard let number = Double(text) else { return (nil, .invalidNumber) }
         return (number, .none)
     }

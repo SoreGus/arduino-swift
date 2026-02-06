@@ -36,8 +36,8 @@ public func arduino_swift_main() {
     println("WiFi status0: \(WiFiS3.status().rawValue)")
 
     let ok = WiFiS3.connectLoop(
-        ssid: "*",
-        password: "*",
+        ssid: "SORE",
+        password: "vStmtv!1",
         attemptDelayMs: 10_000,
         maxAttempts: 0
     )
@@ -54,6 +54,13 @@ public func arduino_swift_main() {
     }
 
     let server = HTTPServer()
+    server.configure(.init(
+        headerMaxBytes: 2048,
+        bodyMaxBytes: 4096,
+        bodyWaitMs: 12000,
+        asyncWaitMs: 15000,
+        pollMs: 5
+    ))
 
     server.onFailure { err in
         println("Failure in Server")

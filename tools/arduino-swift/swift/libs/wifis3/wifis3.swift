@@ -1,6 +1,4 @@
 // wifis3.swift
-// High-level Swift WiFiS3 wrapper for ArduinoSwift ABI (UNO R4 WiFi)
-// Adjusted for embedded safety + consistent behavior.
 
 public enum WiFiS3Status: I32, Sendable {
     case idle             = 0
@@ -15,9 +13,7 @@ public enum WiFiS3Status: I32, Sendable {
 
 public struct WiFiS3IP: Sendable {
     public let a: U8, b: U8, c: U8, d: U8
-    public init(_ a: U8, _ b: U8, _ c: U8, _ d: U8) {
-        self.a = a; self.b = b; self.c = c; self.d = d
-    }
+    public init(_ a: U8, _ b: U8, _ c: U8, _ d: U8) { self.a=a; self.b=b; self.c=c; self.d=d }
 
     public static func fromPacked(_ v: U32) -> WiFiS3IP {
         .init(
@@ -40,41 +36,7 @@ public struct WiFiS3Network: Sendable {
 
 public enum WiFiS3 {
 
-    // ------------------------------------------------------------
-    // MARK: - Internal C string helpers (defensive)
-    // ------------------------------------------------------------
-
-    @inline(__always)
-    private static func withCStringBytes<R>(_ s: String, _ body: (UnsafePointer<U8>) -> R) -> R {
-        var utf8 = Array(s.utf8)
-        utf8.append(0)
-        return utf8.withUnsafeBufferPointer { buf in
-            body(buf.baseAddress!)
-        }
-    }
-
-    /// Reads a C-writer style function that fills UTF-8 bytes and returns number of bytes written.
-    /// If writer returns 0 or invalid size, returns empty string.
-    @inline(__always)
-    private static func readCString(
-        cap: Int = 64,
-        _ writer: (UnsafeMutablePointer<U8>, U32) -> U32
-    ) -> String {
-        if cap <= 1 { return "" }
-
-        var buf = [U8](repeating: 0, count: cap)
-        let n: U32 = buf.withUnsafeMutableBufferPointer { p in
-            writer(p.baseAddress!, U32(p.count))
-        }
-
-        if n == 0 || n >= U32(cap) { return "" }
-        return String(decoding: buf.prefix(Int(n)), as: UTF8.self)
-    }
-
-    // ------------------------------------------------------------
-    // MARK: - Basic
-    // ------------------------------------------------------------
-
+    // Basic
     public static func status() -> WiFiS3Status {
         WiFiS3Status(rawValue: arduino_wifis3_status()) ?? .disconnected
     }
@@ -89,47 +51,43 @@ public enum WiFiS3 {
 
     @discardableResult
     public static func begin(ssid: String, password: String) -> WiFiS3Status {
-        if ssid.isEmpty { return .connectFailed }
-
-        let rc: I32 = withCStringBytes(ssid) { s in
-            withCStringBytes(password) { p in
+        let rc: I32 = ssid.withCString { s in
+            password.withCString { p in
                 arduino_wifis3_begin_ssid_pass(s, p)
             }
         }
         return WiFiS3Status(rawValue: rc) ?? status()
     }
 
-    // ------------------------------------------------------------
-    // MARK: - Info
-    // ------------------------------------------------------------
-
+    // Info
     public static func firmwareVersion() -> String {
-        readCString(cap: 64) { out, outLen in
-            arduino_wifis3_firmwareVersion(UnsafeMutablePointer<CChar>(OpaquePointer(out)), outLen)
+        var buf = [CChar](repeating: 0, count: 64)
+        let cap = U32(buf.count) // ✅ capture before borrowing
+        buf.withUnsafeMutableBufferPointer { p in
+            _ = arduino_wifis3_firmwareVersion(p.baseAddress, cap)
         }
+        return String(cString: buf)
     }
 
     public static func currentSSID() -> String {
-        readCString(cap: 64) { out, outLen in
-            arduino_wifis3_ssid(UnsafeMutablePointer<CChar>(OpaquePointer(out)), outLen)
+        var buf = [CChar](repeating: 0, count: 64)
+        let cap = U32(buf.count) // ✅ capture before borrowing
+        buf.withUnsafeMutableBufferPointer { p in
+            _ = arduino_wifis3_ssid(p.baseAddress, cap)
         }
+        return String(cString: buf)
     }
 
     public static func rssi() -> I32 { arduino_wifis3_rssi() }
 
-    public static func localIP() -> WiFiS3IP {
-        .fromPacked(arduino_wifis3_localIP_u32())
-    }
+    public static func localIP() -> WiFiS3IP { .fromPacked(arduino_wifis3_localIP_u32()) }
 
     /// UNO R4 WiFi: às vezes conecta e ainda está 0.0.0.0 por um tempo
     public static func waitLocalIP(timeoutMs: U32 = 15_000, pollMs: U32 = 100) -> WiFiS3IP {
         .fromPacked(arduino_wifis3_waitLocalIP_u32(timeoutMs, pollMs))
     }
 
-    // ------------------------------------------------------------
-    // MARK: - Scan
-    // ------------------------------------------------------------
-
+    // Scan (opcional)
     public static func scanNetworks() -> [WiFiS3Network] {
         let count = arduino_wifis3_scanNetworks()
         if count <= 0 { return [] }
@@ -137,26 +95,24 @@ public enum WiFiS3 {
         var out: [WiFiS3Network] = []
         out.reserveCapacity(Int(count))
 
-        var i: I32 = 0
-        while i < count {
-            let ssid = readCString(cap: 64) { outPtr, outLen in
-                arduino_wifis3_scan_ssid(i, UnsafeMutablePointer<CChar>(OpaquePointer(outPtr)), outLen)
+        for i in 0..<count {
+            var ssidBuf = [CChar](repeating: 0, count: 64)
+            let cap = U32(ssidBuf.count) // ✅ capture before borrowing
+            ssidBuf.withUnsafeMutableBufferPointer { p in
+                _ = arduino_wifis3_scan_ssid(i, p.baseAddress, cap)
             }
 
-            let rr = arduino_wifis3_scan_rssi(i)
-            let ee = arduino_wifis3_scan_encryptionType(i)
-            out.append(.init(ssid: ssid, rssi: rr, encryptionType: ee))
-            i += 1
+            let ssid = String(cString: ssidBuf)
+            let rssi = arduino_wifis3_scan_rssi(i)
+            let enc  = arduino_wifis3_scan_encryptionType(i)
+            out.append(.init(ssid: ssid, rssi: rssi, encryptionType: enc))
         }
 
         arduino_wifis3_scanDelete() // no-op no C++
         return out
     }
 
-    // ------------------------------------------------------------
-    // MARK: - IDE-like preflight
-    // ------------------------------------------------------------
-
+    // IDE-like preflight
     public struct Preflight: Sendable {
         public let hasModule: Bool
         public let firmware: String
@@ -165,17 +121,18 @@ public enum WiFiS3 {
 
     public static func preflight() -> Preflight {
         let st = status()
-        let fw = firmwareVersion()
-        return .init(hasModule: st != .noModule, firmware: fw, status0: st)
+        let fv = firmwareVersion()
+        return .init(hasModule: st != .noModule, firmware: fv, status0: st)
     }
 
-    /// Loop “igual IDE”: tenta begin e espera entre tentativas.
+    /// Loop “igual IDE”: tenta begin e espera 10s
     public static func connectLoop(
         ssid: String,
         password: String,
         attemptDelayMs: U32 = 10_000,
         maxAttempts: Int = 0 // 0 = infinito
     ) -> Bool {
+
         let pf = preflight()
         if !pf.hasModule { return false }
 
@@ -198,7 +155,7 @@ public enum WiFiS3 {
 }
 
 // ============================================================
-// ArduinoTickable manager
+// ArduinoTickable manager (recomendado)
 // ============================================================
 
 public final class WiFiS3Manager: ArduinoTickable {
@@ -217,7 +174,7 @@ public final class WiFiS3Manager: ArduinoTickable {
     private var ssid: String = ""
     private var password: String = ""
 
-    private var attemptEveryMs: U32 = 10_000 // default IDE-like
+    private var attemptEveryMs: U32 = 10_000 // igual IDE
 
     private var onConnected: ((WiFiS3IP) -> Void)?
     private var onDisconnected: (() -> Void)?
@@ -235,7 +192,7 @@ public final class WiFiS3Manager: ArduinoTickable {
     public func configure(ssid: String, password: String, attemptEveryMs: U32 = 10_000) {
         self.ssid = ssid
         self.password = password
-        self.attemptEveryMs = (attemptEveryMs == 0 ? 1 : attemptEveryMs)
+        self.attemptEveryMs = attemptEveryMs
     }
 
     public func setCallbacks(
@@ -259,12 +216,10 @@ public final class WiFiS3Manager: ArduinoTickable {
         if !didPrintPreflight {
             didPrintPreflight = true
             let pf = WiFiS3.preflight()
-
             println("=== WiFiS3 (UNO R4 WiFi) ===")
             println("WiFiS3.isAvailable(): \(WiFiS3.isAvailable() ? "YES" : "NO")")
             println("WiFi firmwareVersion: '\(pf.firmware)'")
             println("WiFi status0: \(pf.status0.rawValue)")
-
             if !pf.hasModule {
                 println("Communication with WiFi module failed!")
                 state = .failed(status: .noModule)
@@ -298,16 +253,7 @@ public final class WiFiS3Manager: ArduinoTickable {
         case .connecting:
             if now >= nextAttemptAt && !ssid.isEmpty {
                 println("Attempting to connect to SSID: \(ssid)")
-                let rc = WiFiS3.begin(ssid: ssid, password: password)
-
-                if rc == .connectFailed || rc == .noModule {
-                    state = .failed(status: rc)
-                    onFailed?(rc)
-                } else {
-                    // keep trying until status edge says connected
-                    state = .disconnected
-                }
-
+                _ = WiFiS3.begin(ssid: ssid, password: password)
                 nextAttemptAt = now &+ attemptEveryMs
             }
 
