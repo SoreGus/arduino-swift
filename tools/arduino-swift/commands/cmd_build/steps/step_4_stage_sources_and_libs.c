@@ -1,4 +1,22 @@
 // step_4_stage_sources_and_libs.c
+//
+// Purpose:
+//   Stage Swift/C/C++ sources and libraries for the build pipeline.
+//
+// Responsibilities:
+//   1) Collect Swift core sources.
+//   2) Auto-include extra Swift runtime dirs (e.g. essentials), skipping reserved dirs.
+//   3) Resolve user-requested Swift libs (tool + project-local), add Swift files,
+//      and stage C/C++ bridge files.
+//   4) Resolve optional Arduino-side libs for each Swift lib and stage them.
+//   5) Validate user Arduino libs (without copying to avoid duplicates).
+//   6) Add project Swift sources (usage/* etc), excluding build/libs/tests/docs/hidden.
+//
+// Notes:
+//   - Bridge sources are promoted into sketch root to guarantee compilation/link.
+//   - Shim headers are generated in sketch root to forward includes to libraries/<Lib>/src.
+//   - Swift source argument list is deduplicated by exact quoted-path matching.
+//
 #include "step_4_stage_sources_and_libs.h"
 
 #include "common/build_log.h"
@@ -22,7 +40,8 @@ static int str_ieq(const char* a, const char* b) {
         if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
         if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
         if (ca != cb) return 0;
-        ++a; ++b;
+        ++a;
+        ++b;
     }
     return (*a == 0 && *b == 0) ? 1 : 0;
 }
@@ -34,6 +53,8 @@ static int str_endswith_ieq(const char* s, const char* suffix) {
     if (lf > ls) return 0;
     return str_ieq(s + (ls - lf), suffix);
 }
+
+static int swift_args_contains_path(const char* args, const char* path);
 
 static void append_swift_list_as_args(const char* newline_list, char* out_args, size_t out_cap) {
     if (!newline_list || !newline_list[0]) return;
@@ -48,11 +69,13 @@ static void append_swift_list_as_args(const char* newline_list, char* out_args, 
         if (e) *e = 0;
 
         if (p[0]) {
-            size_t need = strlen(out_args) + strlen(p) + 4 + 2;
-            if (need >= out_cap) die("Too many Swift files (args buffer overflow)");
-            strcat(out_args, "\"");
-            strcat(out_args, p);
-            strcat(out_args, "\" ");
+            if (!swift_args_contains_path(out_args, p)) {
+                size_t need = strlen(out_args) + strlen(p) + 4 + 2; // quotes + space + NUL safety
+                if (need >= out_cap) die("Too many Swift files (args buffer overflow)");
+                strcat(out_args, "\"");
+                strcat(out_args, p);
+                strcat(out_args, "\" ");
+            }
         }
 
         if (!e) break;
@@ -62,14 +85,29 @@ static void append_swift_list_as_args(const char* newline_list, char* out_args, 
     free(tmp);
 }
 
+static int swift_args_contains_path(const char* args, const char* path) {
+    if (!args || !path || !path[0]) return 0;
+
+    size_t plen = strlen(path);
+    const char* p = args;
+
+    while ((p = strstr(p, path)) != NULL) {
+        int left_ok  = (p > args && *(p - 1) == '"');
+        int right_ok = (p[plen] == '"');
+        if (left_ok && right_ok) return 1;
+        p += 1;
+    }
+    return 0;
+}
+
 // ------------------------------------------------------------
 // Resolve tool-provided libs
 // ------------------------------------------------------------
 
 static int resolve_swift_lib_dir(const char* runtime_swift,
-                                const char* libName,
-                                char* out_dir, size_t out_dir_cap,
-                                char* out_leaf, size_t out_leaf_cap) {
+                                 const char* libName,
+                                 char* out_dir, size_t out_dir_cap,
+                                 char* out_leaf, size_t out_leaf_cap) {
     char libs_root[1024];
     if (!path_join(libs_root, sizeof(libs_root), runtime_swift, "libs")) return 0;
     return fs_resolve_dir_case_insensitive(libs_root, libName, out_dir, out_dir_cap, out_leaf, out_leaf_cap);
@@ -78,12 +116,12 @@ static int resolve_swift_lib_dir(const char* runtime_swift,
 /*
   Arduino-side libs live at:
     tools/arduino-swift/arduino/libs/<Lib>/*   (NO /src required)
-    (your tool may still stage them into sketch/libraries/<Lib>/src via normalize_arduino_lib_layout)
+    (tool may still stage them into sketch/libraries/<Lib>/src via normalize_arduino_lib_layout)
 */
 static int resolve_arduino_lib_dir(const char* runtime_arduino_root,
-                                  const char* libName,
-                                  char* out_dir, size_t out_dir_cap,
-                                  char* out_leaf, size_t out_leaf_cap) {
+                                   const char* libName,
+                                   char* out_dir, size_t out_dir_cap,
+                                   char* out_leaf, size_t out_leaf_cap) {
     char libs_root[1024];
     if (!path_join(libs_root, sizeof(libs_root), runtime_arduino_root, "libs")) return 0;
     return fs_resolve_dir_case_insensitive(libs_root, libName, out_dir, out_dir_cap, out_leaf, out_leaf_cap);
@@ -125,7 +163,8 @@ static void write_text_file(const char* path, const char* content) {
 static int list_c_cpp_files(const char* dir, char* out, size_t out_cap) {
     if (!dir || !dir[0]) return 0;
     out[0] = 0;
-    return fs_find_list(dir,
+    return fs_find_list(
+        dir,
         "-type f \\( -name \"*.c\" -o -name \"*.cpp\" -o -name \"*.cc\" -o -name \"*.cxx\" \\)",
         out, out_cap
     );
@@ -134,10 +173,11 @@ static int list_c_cpp_files(const char* dir, char* out, size_t out_cap) {
 static int list_headers(const char* dir, char* out, size_t out_cap) {
     if (!dir || !dir[0]) return 0;
     out[0] = 0;
-    // include .h + .hpp
-    if (!fs_find_list(dir, "-type f \\( -name \"*.h\" -o -name \"*.hpp\" -o -name \"*.hh\" -o -name \"*.hxx\" \\)", out, out_cap))
-        return 0;
-    return 1;
+    return fs_find_list(
+        dir,
+        "-type f \\( -name \"*.h\" -o -name \"*.hpp\" -o -name \"*.hh\" -o -name \"*.hxx\" \\)",
+        out, out_cap
+    );
 }
 
 static int list_first_level_dirs(const char* dir, char* out, size_t out_cap) {
@@ -166,13 +206,114 @@ static int should_skip_swift_top_dir(const char* name) {
     return 0;
 }
 
+static int path_has_segment(const char* rel, const char* seg) {
+    if (!rel || !seg) return 0;
+
+    size_t n = strlen(seg);
+    if (n == 0) return 0;
+
+    if (strncmp(rel, seg, n) == 0 && (rel[n] == '/' || rel[n] == 0)) return 1;
+
+    const char* p = rel;
+    while ((p = strstr(p, seg)) != NULL) {
+        int left_ok  = (p == rel) || (*(p - 1) == '/');
+        int right_ok = (p[n] == '/') || (p[n] == 0);
+        if (left_ok && right_ok) return 1;
+        p += 1;
+    }
+    return 0;
+}
+
+static int should_skip_project_swift_rel(const char* rel) {
+    if (!rel || !rel[0]) return 1;
+
+    // hidden files/dirs
+    if (rel[0] == '.') return 1;
+    if (strstr(rel, "/.")) return 1;
+
+    // project libs are handled separately via ctx->swift_libs
+    if (path_has_segment(rel, "libs")) return 1;
+
+    // build/VCS/package/editor dirs
+    if (path_has_segment(rel, "build")) return 1;
+    if (path_has_segment(rel, ".build")) return 1;
+    if (path_has_segment(rel, ".git")) return 1;
+    if (path_has_segment(rel, ".swiftpm")) return 1;
+    if (path_has_segment(rel, ".idea")) return 1;
+    if (path_has_segment(rel, ".vscode")) return 1;
+
+    // optional non-runtime dirs
+    if (path_has_segment(rel, "test")) return 1;
+    if (path_has_segment(rel, "tests")) return 1;
+    if (path_has_segment(rel, "example")) return 1;
+    if (path_has_segment(rel, "examples")) return 1;
+    if (path_has_segment(rel, "doc")) return 1;
+    if (path_has_segment(rel, "docs")) return 1;
+
+    return 0;
+}
+
+static void append_project_swift_sources(BuildContext* ctx) {
+    char list[262144];
+    list[0] = 0;
+
+    if (!fs_find_list(ctx->project_root, "-type f -name \"*.swift\"", list, sizeof(list))) {
+        log_error("Failed listing project Swift sources under: %s", ctx->project_root);
+        die("Failed listing project Swift sources");
+    }
+
+    if (!list[0]) {
+        log_warn("No project Swift sources found under: %s", ctx->project_root);
+        return;
+    }
+
+    char* tmp = (char*)malloc(strlen(list) + 1);
+    if (!tmp) die("OOM");
+    strcpy(tmp, list);
+
+    size_t root_len = strlen(ctx->project_root);
+
+    char* p = tmp;
+    while (*p) {
+        char* e = strchr(p, '\n');
+        if (e) *e = 0;
+
+        if (p[0]) {
+            const char* rel = p;
+            if (strncmp(p, ctx->project_root, root_len) == 0) {
+                rel = p + root_len;
+                if (*rel == '/') rel++;
+            }
+
+            if (!should_skip_project_swift_rel(rel)) {
+                if (!swift_args_contains_path(ctx->swift_args, p)) {
+                    size_t need = strlen(ctx->swift_args) + strlen(p) + 4 + 2;
+                    if (need >= sizeof(ctx->swift_args)) {
+                        free(tmp);
+                        die("Too many project Swift files (args buffer overflow)");
+                    }
+
+                    strcat(ctx->swift_args, "\"");
+                    strcat(ctx->swift_args, p);
+                    strcat(ctx->swift_args, "\" ");
+                }
+            }
+        }
+
+        if (!e) break;
+        p = e + 1;
+    }
+
+    free(tmp);
+}
+
 // ------------------------------------------------------------
 // Path derivation: ctx->runtime_arduino currently points to ".../arduino/commom"
 // but Arduino-side libs live at ".../arduino/libs". So we derive the parent.
 // ------------------------------------------------------------
 
 static int derive_arduino_runtime_root(const char* runtime_arduino,
-                                      char* out_root, size_t out_root_cap) {
+                                       char* out_root, size_t out_root_cap) {
     if (!runtime_arduino || !runtime_arduino[0]) return 0;
     if (!out_root || out_root_cap == 0) return 0;
 
@@ -244,11 +385,10 @@ static void generate_shim_headers_for_lib(const char* sketch_dir, const char* le
 
                 char content[1400];
                 snprintf(content, sizeof(content),
-                    "// Auto-generated by ArduinoSwift\n"
-                    "#pragma once\n"
-                    "#include \"%s\"\n",
-                    rel
-                );
+                         "// Auto-generated by ArduinoSwift\n"
+                         "#pragma once\n"
+                         "#include \"%s\"\n",
+                         rel);
                 write_text_file(shim_path, content);
                 log_info("Shim header: %s -> %s", base, rel);
             }
@@ -306,9 +446,9 @@ static void promote_bridge_sources_to_sketch_root(const char* sketch_dir, const 
   This keeps things organized and also helps if the user later wants pure Arduino-lib behavior.
 
   IMPORTANT:
-  - Your tool runtime libs are stored as arduino/libs/<Lib>/* (NO /src).
-  - This function runs only on the *staged* copy inside build/sketch/libraries/<Lib>.
-  - So you can keep your repo layout flat; staging becomes /src automatically.
+  - Tool runtime libs are stored as arduino/libs/<Lib>/* (NO /src).
+  - This function runs only on the staged copy inside build/sketch/libraries/<Lib>.
+  - Repo layout can stay flat; staging becomes /src automatically.
 */
 static void normalize_arduino_lib_layout(const char* lib_dir) {
     if (!lib_dir || !lib_dir[0]) return;
@@ -319,24 +459,27 @@ static void normalize_arduino_lib_layout(const char* lib_dir) {
 
     if (dir_exists(src_dir)) return;
 
-    // if root has sources/headers, move into src
+    // If root has sources/headers, move into src
     char probe_cmd[2048];
-    snprintf(probe_cmd, sizeof(probe_cmd),
-             "cd \"%s\" && find . -maxdepth 1 -type f \\( -name \"*.c\" -o -name \"*.cpp\" -o -name \"*.cc\" -o -name \"*.cxx\" -o -name \"*.h\" -o -name \"*.hpp\" -o -name \"*.hh\" -o -name \"*.hxx\" \\) | grep -q .",
-             lib_dir);
+    snprintf(
+        probe_cmd, sizeof(probe_cmd),
+        "cd \"%s\" && find . -maxdepth 1 -type f "
+        "\\( -name \"*.c\" -o -name \"*.cpp\" -o -name \"*.cc\" -o -name \"*.cxx\" "
+        "-o -name \"*.h\" -o -name \"*.hpp\" -o -name \"*.hh\" -o -name \"*.hxx\" \\) | grep -q .",
+        lib_dir
+    );
     if (run_cmd(probe_cmd) != 0) return;
 
     char cmd[8192];
     snprintf(cmd, sizeof(cmd),
-      "set -e; "
-      "cd \"%s\"; "
-      "mkdir -p \"src\"; "
-      "for f in *.c *.cpp *.cc *.cxx *.h *.hpp *.hh *.hxx; do "
-      "  [ -f \"$f\" ] && mv \"$f\" \"src/\" || true; "
-      "done; "
-      "true",
-      lib_dir
-    );
+             "set -e; "
+             "cd \"%s\"; "
+             "mkdir -p \"src\"; "
+             "for f in *.c *.cpp *.cc *.cxx *.h *.hpp *.hh *.hxx; do "
+             "  [ -f \"$f\" ] && mv \"$f\" \"src/\" || true; "
+             "done; "
+             "true",
+             lib_dir);
     (void)run_cmd(cmd);
 }
 
@@ -354,29 +497,27 @@ static void ensure_arduino_library_properties(const char* lib_dir, const char* l
     if (!f) return;
 
     fprintf(f,
-        "name=%s\n"
-        "version=0.0.0\n"
-        "author=ArduinoSwift\n"
-        "maintainer=ArduinoSwift\n"
-        "sentence=Auto-generated metadata for staged ArduinoSwift bridge sources.\n"
-        "paragraph=Generated by ArduinoSwift to keep staged libs in Arduino 1.5 format.\n"
-        "category=Other\n"
-        "url=\n"
-        "architectures=*\n",
-        lib_name
-    );
+            "name=%s\n"
+            "version=0.0.0\n"
+            "author=ArduinoSwift\n"
+            "maintainer=ArduinoSwift\n"
+            "sentence=Auto-generated metadata for staged ArduinoSwift bridge sources.\n"
+            "paragraph=Generated by ArduinoSwift to keep staged libs in Arduino 1.5 format.\n"
+            "category=Other\n"
+            "url=\n"
+            "architectures=*\n",
+            lib_name);
     fclose(f);
 }
 
 static void debug_dump_sketch_tree(const char* sketch_dir) {
     char cmd[4096];
     snprintf(cmd, sizeof(cmd),
-      "echo \"--- sketch tree (maxdepth=4) ---\"; "
-      "cd \"%s\" && "
-      "find . -maxdepth 4 -type f | sed 's|^\\./||' | sort; "
-      "echo \"--- end sketch tree ---\"",
-      sketch_dir
-    );
+             "echo \"--- sketch tree (maxdepth=4) ---\"; "
+             "cd \"%s\" && "
+             "find . -maxdepth 4 -type f | sed 's|^\\./||' | sort; "
+             "echo \"--- end sketch tree ---\"",
+             sketch_dir);
     run_cmd(cmd);
 }
 
@@ -392,7 +533,7 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
     // --------------------------------------------------
     // 0) Derive Arduino runtime root for Arduino-side libs
     //
-    // ctx->runtime_arduino is currently ".../arduino/commom"
+    // ctx->runtime_arduino may point to ".../arduino/commom"
     // but Arduino-side libs live in ".../arduino/libs/<Lib>/*"
     // --------------------------------------------------
     char arduino_runtime_root[1024];
@@ -400,7 +541,6 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
         log_warn("Failed deriving Arduino runtime root from: %s (using as-is)", ctx->runtime_arduino);
         snprintf(arduino_runtime_root, sizeof(arduino_runtime_root), "%s", ctx->runtime_arduino);
     } else {
-        // Optional: make it visible in logs (helps debugging)
         log_info("Arduino runtime root: %s", arduino_runtime_root);
     }
 
@@ -487,7 +627,7 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
     }
 
     if (ctx->swift_lib_count > 0) log_info("Including %d Swift lib(s)", ctx->swift_lib_count);
-    else                         log_info("No Swift libs specified -> core + auto system dirs only");
+    else                          log_info("No Swift libs specified -> core + auto system dirs only");
 
     // --------------------------------------------------
     // 2) Swift libs + optional Arduino libs
@@ -504,16 +644,18 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
         char swift_leaf[64] = {0};
         int found_swift = 0;
 
-        // tool swift libs
+        // Tool Swift libs
         if (resolve_swift_lib_dir(ctx->runtime_swift, libname, swift_libdir, sizeof(swift_libdir), swift_leaf, sizeof(swift_leaf))) {
             found_swift = 1;
         }
 
-        // project-local swift libs
+        // Project-local Swift libs
         if (!found_swift) {
             char project_swift_root[1024];
-            if (path_join(project_swift_root, sizeof(project_swift_root), ctx->project_root, "libs") && dir_exists(project_swift_root)) {
-                if (fs_resolve_dir_case_insensitive(project_swift_root, libname, swift_libdir, sizeof(swift_libdir), swift_leaf, sizeof(swift_leaf))) {
+            if (path_join(project_swift_root, sizeof(project_swift_root), ctx->project_root, "libs") &&
+                dir_exists(project_swift_root)) {
+                if (fs_resolve_dir_case_insensitive(project_swift_root, libname, swift_libdir, sizeof(swift_libdir),
+                                                    swift_leaf, sizeof(swift_leaf))) {
                     found_swift = 1;
                     log_info("Using project-local Swift lib: %s (%s)", swift_leaf, swift_libdir);
                 }
@@ -525,7 +667,7 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
             return 0;
         }
 
-        // add swift sources to swiftc args
+        // Add Swift sources to swiftc args
         char lib_list[65535];
         lib_list[0] = 0;
         if (!fs_find_list(swift_libdir, "-type f -name \"*.swift\"", lib_list, sizeof(lib_list)) || !lib_list[0]) {
@@ -564,7 +706,8 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
             char arduino_libdir[1024];
             char arduino_leaf[64] = {0};
 
-            if (resolve_arduino_lib_dir(arduino_runtime_root, libname, arduino_libdir, sizeof(arduino_libdir), arduino_leaf, sizeof(arduino_leaf))) {
+            if (resolve_arduino_lib_dir(arduino_runtime_root, libname, arduino_libdir,
+                                        sizeof(arduino_libdir), arduino_leaf, sizeof(arduino_leaf))) {
                 const char* aleaf = (arduino_leaf[0] ? arduino_leaf : libname);
 
                 char dst_libdir[1024];
@@ -580,7 +723,7 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
                 normalize_arduino_lib_layout(dst_libdir);
                 ensure_arduino_library_properties(dst_libdir, aleaf);
 
-                // same guarantee rule:
+                // Same guarantee rule:
                 generate_shim_headers_for_lib(ctx->sketch_dir, aleaf);
                 promote_bridge_sources_to_sketch_root(ctx->sketch_dir, aleaf);
             } else {
@@ -602,7 +745,9 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
             char ext_libdir[1024];
             char ext_leaf[64] = {0};
 
-            if (!fs_resolve_dir_case_insensitive(ctx->user_arduino_lib_dir, libname, ext_libdir, sizeof(ext_libdir), ext_leaf, sizeof(ext_leaf))) {
+            if (!fs_resolve_dir_case_insensitive(ctx->user_arduino_lib_dir, libname,
+                                                 ext_libdir, sizeof(ext_libdir),
+                                                 ext_leaf, sizeof(ext_leaf))) {
                 log_warn("User Arduino lib not found in sketchbook: %s (skipping)", libname);
                 continue;
             }
@@ -611,6 +756,11 @@ int cmd_build_step_4_stage_sources_and_libs(BuildContext* ctx) {
             log_info("Using user Arduino lib (sketchbook): %s (%s)", leaf, ext_libdir);
         }
     }
+
+    // --------------------------------------------------
+    // 4) Project Swift sources (usage/* etc), excluding libs/build/hidden
+    // --------------------------------------------------
+    append_project_swift_sources(ctx);
 
     debug_dump_sketch_tree(ctx->sketch_dir);
     return 1;

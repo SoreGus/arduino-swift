@@ -103,12 +103,88 @@ static void swift_xcc_float_flags(const BuildContext* ctx, char* out, size_t cap
     // Due / others: no extra float flags
 }
 
+
+static int swift_args_contains_path(const char* args, const char* path) {
+    if (!args || !path || !args[0] || !path[0]) return 0;
+
+    char needle[2048];
+    snprintf(needle, sizeof(needle), "\"%s\"", path);
+    return strstr(args, needle) != NULL;
+}
+
+static void dedupe_swift_args_inplace(char* args, size_t cap) {
+    if (!args || cap == 0 || !args[0]) return;
+
+    char* in = (char*)malloc(strlen(args) + 1);
+    if (!in) return;
+    strcpy(in, args);
+
+    args[0] = 0;
+
+    char* p = in;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+
+        if (*p == '"') {
+            char* q = p + 1;
+            while (*q && *q != '"') q++;
+            if (!*q) break;
+
+            size_t plen = (size_t)(q - p + 1);
+            if (plen >= 2048) {
+                p = q + 1;
+                continue;
+            }
+
+            char token[2048];
+            memcpy(token, p, plen);
+            token[plen] = 0;
+
+            if (!strstr(args, token)) {
+                size_t need = strlen(args) + plen + 2;
+                if (need < cap) {
+                    strcat(args, token);
+                    strcat(args, " ");
+                }
+            }
+
+            p = q + 1;
+        } else {
+            char* q = p;
+            while (*q && *q != ' ') q++;
+            size_t plen = (size_t)(q - p);
+            if (plen > 0 && plen < 2048) {
+                char token[2048];
+                memcpy(token, p, plen);
+                token[plen] = 0;
+
+                if (!strstr(args, token)) {
+                    size_t need = strlen(args) + plen + 2;
+                    if (need < cap) {
+                        strcat(args, token);
+                        strcat(args, " ");
+                    }
+                }
+            }
+            p = q;
+        }
+    }
+
+    free(in);
+}
+
 static int append_main_swift(BuildContext* ctx) {
     if (!ctx) return 0;
 
     if (!file_exists(ctx->main_swift_path)) {
         log_error("Missing main.swift at project root: %s", ctx->main_swift_path);
         return 0;
+    }
+
+    // If already present in ctx->swift_args, do not append again.
+    if (swift_args_contains_path(ctx->swift_args, ctx->main_swift_path)) {
+        return 1;
     }
 
     size_t need = strlen(ctx->swift_args) + strlen(ctx->main_swift_path) + 8;
@@ -167,7 +243,11 @@ static void sanitize_board_options_csv(const char* in, char* out, size_t cap) {
 int cmd_build_step_5_compile_and_arduino_cli(BuildContext* ctx) {
     if (!ctx) return 0;
 
+    // Defensive dedupe: earlier steps may already include usage/main.swift.
+    dedupe_swift_args_inplace(ctx->swift_args, sizeof(ctx->swift_args));
     if (!append_main_swift(ctx)) return 0;
+    // Ensure final argument list is unique before invoking swiftc.
+    dedupe_swift_args_inplace(ctx->swift_args, sizeof(ctx->swift_args));
 
     const int renesas = is_renesas_uno_fqbn(ctx);
     const int giga    = is_mbed_giga_fqbn(ctx);
@@ -183,6 +263,8 @@ int cmd_build_step_5_compile_and_arduino_cli(BuildContext* ctx) {
 
         char xcc_float[512];
         swift_xcc_float_flags(ctx, xcc_float, sizeof(xcc_float));
+
+        log_info("Swift sources args (deduped): %s", ctx->swift_args);
 
         snprintf(swiftc_cmd, sizeof(swiftc_cmd),
             "%s "
